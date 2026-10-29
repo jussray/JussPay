@@ -6,7 +6,7 @@ export async function verifySignature(body,header,secret,now=Math.floor(Date.now
  if(!header||!secret)return false;
  const t=header.match(/(?:^|,)t=(\d+)(?:,|$)/)?.[1],sigs=[...header.matchAll(/(?:^|,)v1=([a-f0-9]{64})(?:,|$)/g)].map(m=>m[1]);
  if(!t||!sigs.length||Math.abs(now-Number(t))>300)return false;
- const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),"HMAC",false,["sign"]);
+ const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
  const sig=hex(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(t+"."+body)));
  return sigs.some(s=>eq(s,sig));
 }
