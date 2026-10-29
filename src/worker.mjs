@@ -22,7 +22,8 @@ export default {async fetch(req,env){
   if(!env.STRIPE_SECRET_KEY||!env.CATALOG||!env.APP_ORIGIN||!env.ORDERS)return json({error:"not_configured"},503);
   let input;try{input=await req.json()}catch{return json({error:"invalid_json"},400)}
   if(typeof input?.product_id!=="string"||typeof input?.purchase_id!=="string"||!/^[a-zA-Z0-9_-]{8,100}$/.test(input.purchase_id))return json({error:"invalid_request"},400);
-  const product=JSON.parse(env.CATALOG)[input.product_id];
+  let catalog;try{catalog=JSON.parse(env.CATALOG)}catch{return json({error:"catalog_misconfigured"},503)}
+  const product=catalog?.[input.product_id];
   if(!product||!Number.isSafeInteger(product.amount)||product.amount<=0||! /^[a-z]{3}$/.test(product.currency)||!product.merchant_id)return json({error:"unknown_product"},400);
   if(!allowed(env.APP_ORIGIN,env.APP_ORIGIN))return json({error:"invalid_origin"},503);
   // A separate authenticated order-creation service is still required before this route is exposed.
@@ -37,9 +38,9 @@ export default {async fetch(req,env){
   const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=?").bind(input.purchase_id).first();
   if(!order||order.customer_id!==principal.subject||order.product_id!==input.product_id||order.merchant_id!==product.merchant_id||order.amount_total!==product.amount||order.currency!==product.currency||order.status!=="pending")return json({error:"order_not_authorized"},403);
   const params=new URLSearchParams({mode:"payment",success_url:env.APP_ORIGIN+"/payment/return?session_id={CHECKOUT_SESSION_ID}",cancel_url:env.APP_ORIGIN+"/payment/cancel",client_reference_id:order.id,"line_items[0][price_data][currency]":product.currency,"line_items[0][price_data][unit_amount]":String(product.amount),"line_items[0][price_data][product_data][name]":product.name,"line_items[0][quantity]":"1","metadata[purchase_id]":order.id,"metadata[product_id]":order.product_id,"metadata[merchant_id]":order.merchant_id});
-  const response=await fetch("https://api.stripe.com/v1/checkout/sessions",{method:"POST",headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY,"content-type":"application/x-www-form-urlencoded","idempotency-key":"jusspay-"+order.id},body:params});
+  let response;try{response=await fetch("https://api.stripe.com/v1/checkout/sessions",{method:"POST",headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY,"content-type":"application/x-www-form-urlencoded","idempotency-key":"jusspay-"+order.id},body:params})}catch{return json({error:"checkout_provider_unavailable"},503)}
   if(!response.ok)return json({error:"checkout_provider_error"},502);
-  const session=await response.json();
+  let session;try{session=await response.json()}catch{return json({error:"invalid_provider_response"},502)}
   if(!session.id||!session.url)return json({error:"invalid_provider_response"},502);
   const saved=await env.ORDERS.prepare("UPDATE orders SET session_id=? WHERE id=? AND status='pending' AND (session_id IS NULL OR session_id=?)").bind(session.id,order.id,session.id).run();
   if(saved.meta?.changes!==1)return json({error:"checkout_state_conflict"},409);
@@ -58,9 +59,9 @@ export default {async fetch(req,env){
   if(!validatePurchase(s,order))return json({error:"purchase_mismatch"},409);
   // Provider readback is required: never trust a signed event payload alone.
   if(!env.STRIPE_SECRET_KEY?.startsWith("rk_test_")&&!env.STRIPE_SECRET_KEY?.startsWith("sk_test_"))return json({error:"sandbox_key_required"},503);
-  const check=await fetch("https://api.stripe.com/v1/checkout/sessions/"+encodeURIComponent(s.id),{headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY}});
+  let check;try{check=await fetch("https://api.stripe.com/v1/checkout/sessions/"+encodeURIComponent(s.id),{headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY}})}catch{return json({error:"provider_reconciliation_failed"},503)}
   if(!check.ok)return json({error:"provider_reconciliation_failed"},503);
-  const current=await check.json();
+  let current;try{current=await check.json()}catch{return json({error:"provider_reconciliation_failed"},503)}
   if(!validatePurchase(current,order))return json({error:"provider_purchase_mismatch"},409);
   // A local paid flag is not an entitlement; downstream fulfillment remains disabled.
   await env.ORDERS.prepare("UPDATE orders SET status='paid' WHERE id=? AND status='pending' AND session_id=?").bind(order.id,s.id).run();
