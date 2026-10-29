@@ -29,3 +29,14 @@ test("accepts correctly signed current Stripe webhook",async()=>{
 test("rejects signature with nonnumeric timestamp",async()=>assert.equal(await verifySignature("{}","t=invalid,v1="+"a".repeat(64),"secret"),false));
 test("rejects forged session metadata",()=>assert.equal(validatePurchase({...session,metadata:{...session.metadata,purchase_id:"another"}},order),false));
 test("rejects paid session without order",()=>assert.equal(validatePurchase(session,null),false));
+
+test("checkout fails closed on malformed catalog",async()=>{
+ const r=await worker.fetch(request("/checkout",{product_id:"api",purchase_id:"purchase_123"}),{PAYMENTS_ENABLED:"true",STRIPE_SECRET_KEY:"sk_test_dummy",CATALOG:"{broken",APP_ORIGIN:"https://app.example",ORDERS:{}});
+ assert.equal(r.status,503);
+ assert.equal((await r.json()).error,"catalog_misconfigured");
+});
+test("checkout rejects catalog with null root",async()=>{
+ const r=await worker.fetch(request("/checkout",{product_id:"api",purchase_id:"purchase_123"}),{PAYMENTS_ENABLED:"true",STRIPE_SECRET_KEY:"sk_test_dummy",CATALOG:"null",APP_ORIGIN:"https://app.example",ORDERS:{}});
+ assert.equal(r.status,400);
+ assert.equal((await r.json()).error,"unknown_product");
+});
