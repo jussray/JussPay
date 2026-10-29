@@ -16,3 +16,16 @@ test("checkout blocks missing auth service",async()=>{const r=await worker.fetch
 test("checkout blocks unauthenticated request before order lookup",async()=>{const r=await worker.fetch(request("/checkout",{product_id:"api",purchase_id:"purchase_123"}),{PAYMENTS_ENABLED:"true",CHECKOUT_AUTH_READY:"true",AUTH_SERVICE:{fetch:async()=>{throw Error("must not call")}},STRIPE_SECRET_KEY:"sk_test_dummy",CATALOG:JSON.stringify({api:{name:"API",amount:1000,currency:"usd",merchant_id:"juss"}}),APP_ORIGIN:"https://app.example",ORDERS:{prepare:()=>{throw Error("must not query")}}});assert.equal(r.status,401)});
 test("checkout rejects different customer without calling Stripe",async()=>{const r=await worker.fetch(request("/checkout",{product_id:"api",purchase_id:"purchase_123"},{authorization:"Bearer dummy"}),{PAYMENTS_ENABLED:"true",CHECKOUT_AUTH_READY:"true",AUTH_SERVICE:{fetch:async()=>new Response(JSON.stringify({subject:"other"}),{status:200})},STRIPE_SECRET_KEY:"sk_test_dummy",CATALOG:JSON.stringify({api:{name:"API",amount:1000,currency:"usd",merchant_id:"juss"}}),APP_ORIGIN:"https://app.example",ORDERS:{prepare:()=>({bind:()=>({first:async()=>({...order,customer_id:"actual",status:"pending"})})})}});assert.equal(r.status,403)});
 test("webhook blocks until reconciliation is enabled",async()=>{const r=await worker.fetch(request("/stripe/webhook",{}),{PAYMENTS_ENABLED:"true",STRIPE_WEBHOOK_SECRET:"whsec_dummy",ORDERS:{}});assert.equal((await r.json()).error,"reconciliation_not_ready")});
+
+test("accepts correctly signed current Stripe webhook",async()=>{
+ const body=JSON.stringify({id:"evt_test"}),secret="whsec_local_test",timestamp=1700000000;
+ const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ const bytes=await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(timestamp+"."+body));
+ const signature=Buffer.from(bytes).toString("hex");
+ assert.equal(await verifySignature(body,`t=${timestamp},v1=${signature}`,secret,timestamp),true);
+ assert.equal(await verifySignature(body+" ",`t=${timestamp},v1=${signature}`,secret,timestamp),false);
+ assert.equal(await verifySignature(body,`t=${timestamp},v1=${signature}`,"different_secret",timestamp),false);
+});
+test("rejects signature with nonnumeric timestamp",async()=>assert.equal(await verifySignature("{}","t=invalid,v1="+"a".repeat(64),"secret"),false));
+test("rejects forged session metadata",()=>assert.equal(validatePurchase({...session,metadata:{...session.metadata,purchase_id:"another"}},order),false));
+test("rejects paid session without order",()=>assert.equal(validatePurchase(session,null),false));
