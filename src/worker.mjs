@@ -26,9 +26,16 @@ export default {async fetch(req,env){
   if(!product||!Number.isSafeInteger(product.amount)||product.amount<=0||! /^[a-z]{3}$/.test(product.currency)||!product.merchant_id)return json({error:"unknown_product"},400);
   if(!allowed(env.APP_ORIGIN,env.APP_ORIGIN))return json({error:"invalid_origin"},503);
   // A separate authenticated order-creation service is still required before this route is exposed.
-  if(env.CHECKOUT_AUTH_READY!=="true")return json({error:"authorization_not_ready"},503);
+  if(env.CHECKOUT_AUTH_READY!=="true"||!env.AUTH_SERVICE)return json({error:"authorization_not_ready"},503);
+  const token=req.headers.get("authorization");
+  if(!token?.startsWith("Bearer "))return json({error:"unauthorized"},401);
+  let identity;
+  try{identity=await env.AUTH_SERVICE.fetch(new Request("https://auth.internal/verify",{method:"POST",headers:{authorization:token}}));}catch{return json({error:"auth_unavailable"},503)}
+  if(!identity.ok)return json({error:"unauthorized"},401);
+  let principal;try{principal=await identity.json()}catch{return json({error:"auth_unavailable"},503)}
+  if(!principal?.subject||typeof principal.subject!=="string")return json({error:"unauthorized"},401);
   const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=?").bind(input.purchase_id).first();
-  if(!order||order.product_id!==input.product_id||order.merchant_id!==product.merchant_id||order.amount_total!==product.amount||order.currency!==product.currency||order.status!=="pending")return json({error:"order_not_authorized"},403);
+  if(!order||order.customer_id!==principal.subject||order.product_id!==input.product_id||order.merchant_id!==product.merchant_id||order.amount_total!==product.amount||order.currency!==product.currency||order.status!=="pending")return json({error:"order_not_authorized"},403);
   const params=new URLSearchParams({mode:"payment",success_url:env.APP_ORIGIN+"/payment/return?session_id={CHECKOUT_SESSION_ID}",cancel_url:env.APP_ORIGIN+"/payment/cancel",client_reference_id:order.id,"line_items[0][price_data][currency]":product.currency,"line_items[0][price_data][unit_amount]":String(product.amount),"line_items[0][price_data][product_data][name]":product.name,"line_items[0][quantity]":"1","metadata[purchase_id]":order.id,"metadata[product_id]":order.product_id,"metadata[merchant_id]":order.merchant_id});
   const response=await fetch("https://api.stripe.com/v1/checkout/sessions",{method:"POST",headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY,"content-type":"application/x-www-form-urlencoded","idempotency-key":"jusspay-"+order.id},body:params});
   if(!response.ok)return json({error:"checkout_provider_error"},502);
@@ -49,6 +56,12 @@ export default {async fetch(req,env){
   if(!s?.id||s.payment_status!=="paid")return json({received:true});
   const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=?").bind(s.client_reference_id||"").first();
   if(!validatePurchase(s,order))return json({error:"purchase_mismatch"},409);
+  // Provider readback is required: never trust a signed event payload alone.
+  if(!env.STRIPE_SECRET_KEY?.startsWith("rk_test_")&&!env.STRIPE_SECRET_KEY?.startsWith("sk_test_"))return json({error:"sandbox_key_required"},503);
+  const check=await fetch("https://api.stripe.com/v1/checkout/sessions/"+encodeURIComponent(s.id),{headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY}});
+  if(!check.ok)return json({error:"provider_reconciliation_failed"},503);
+  const current=await check.json();
+  if(!validatePurchase(current,order))return json({error:"provider_purchase_mismatch"},409);
   // A local paid flag is not an entitlement; downstream fulfillment remains disabled.
   await env.ORDERS.prepare("UPDATE orders SET status='paid' WHERE id=? AND status='pending' AND session_id=?").bind(order.id,s.id).run();
   return json({received:true});
