@@ -1,0 +1,9 @@
+{
+  "name": "jusspay-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/worker.mjs && node --check test/worker.test.mjs"
+  }
+}
