@@ -64,7 +64,11 @@ export default {async fetch(req,env){
   let current;try{current=await check.json()}catch{return json({error:"provider_reconciliation_failed"},503)}
   if(!validatePurchase(current,order))return json({error:"provider_purchase_mismatch"},409);
   // A local paid flag is not an entitlement; downstream fulfillment remains disabled.
-  await env.ORDERS.prepare("UPDATE orders SET status='paid' WHERE id=? AND status='pending' AND session_id=?").bind(order.id,s.id).run();
+  let persisted;try{persisted=await env.ORDERS.prepare("UPDATE orders SET status='paid' WHERE id=? AND status='pending' AND session_id=?").bind(order.id,s.id).run()}catch{return json({error:"reconciliation_persist_failed"},503)}
+  if(persisted.meta?.changes!==1){
+   const latest=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=?").bind(order.id).first().catch(()=>null);
+   if(!latest||latest.status!=="paid"||!validatePurchase(current,latest))return json({error:"reconciliation_state_conflict"},409);
+  }
   return json({received:true});
  }
  return json({error:"not_found"},404);
