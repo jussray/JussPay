@@ -40,3 +40,18 @@ test("checkout rejects catalog with null root",async()=>{
  assert.equal(r.status,400);
  assert.equal((await r.json()).error,"unknown_product");
 });
+
+test("webhook does not acknowledge failed paid-state persistence",async()=>{
+ const body=JSON.stringify({type:"checkout.session.completed",data:{object:session}});
+ const secret="whsec_local_test",t=Math.floor(Date.now()/1000);
+ const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ const sig=Buffer.from(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(t+"."+body))).toString("hex");
+ const originalFetch=globalThis.fetch;
+ const database={prepare(sql){return {bind(){return {first:async()=>({...order,status:"pending"}),run:async()=>{throw Error("database unavailable")}}}}}};
+ globalThis.fetch=async()=>new Response(JSON.stringify(session),{status:200});
+ try{
+  const r=await worker.fetch(new Request("https://pay.example/stripe/webhook",{method:"POST",headers:{"stripe-signature":`t=${t},v1=${sig}`},body}),{PAYMENTS_ENABLED:"true",STRIPE_WEBHOOK_SECRET:secret,WEBHOOK_RECONCILIATION_READY:"true",STRIPE_SECRET_KEY:"sk_test_dummy",ORDERS:database});
+  assert.equal(r.status,503);
+  assert.equal((await r.json()).error,"reconciliation_persist_failed");
+ }finally{globalThis.fetch=originalFetch}
+});
