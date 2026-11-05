@@ -75,7 +75,7 @@ export default {async fetch(request,env){try{
     const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({id,name,purchaseStatus:operational&&catalog[id]?'requires_provider_validation':'unavailable',providerAvailabilityVerified:false,offerConfigured:Boolean(catalog[id]),...(catalog[id]?{unitAmount:catalog[id].unitAmount,currency:catalog[id].currency,interval:catalog[id].interval,termsUrl:catalog[id].termsUrl,entitlements:catalog[id].entitlements}:{})})));
   }
   const ORDER_PATHS=['/subscriptions/orders','/subscriptions/checkout','/subscriptions/status','/subscriptions/entitlement','/orders/checkout'];
-  if(ORDER_PATHS.includes(url.pathname) && env.PAYMENTS_ENABLED!=='true')return json({error:'payments_disabled'},503);
+  if((ORDER_PATHS.includes(url.pathname)||url.pathname==='/checkout') && env.PAYMENTS_ENABLED!=='true')return json({error:'payments_disabled'},503);
   ready(env,url.pathname==='/webhook');
   if(url.pathname==='/webhook' && request.method==='POST'){
     const raw=await boundedText(request,262144);
