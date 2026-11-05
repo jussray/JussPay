@@ -27,6 +27,7 @@ async function ordersEnv(){
   return h;
 }
 test('checkout is disabled without feature gate',async()=>{const r=await worker.fetch(request('/orders/checkout',{product_id:'api',purchase_id:'purchase_123'}),{});assert.equal(r.status,503);assert.equal((await r.json()).error,'payments_disabled')});
+test('checkout is disabled without the payments feature gate',async()=>{const r=await worker.fetch(request('/checkout',{product:'api'}),{});assert.equal(r.status,503);assert.equal((await r.json()).error,'payments_disabled')});
 test('checkout rejects non-sandbox Stripe key',async()=>{const h=await ordersEnv();h.env.STRIPE_SECRET_KEY='sk_live_not_real';const r=await worker.fetch(request('/orders/checkout',{product_id:'api',purchase_id:'purchase_123'},{authorization:'Bearer <redacted>'}),h.env);assert.equal((await r.json()).error,'sandbox_key_required')});
 test('checkout fails closed when the AUTH binding rejects the token',async()=>{const h=await ordersEnv();h.env.AUTH={fetch:async()=>new Response('',{status:401})};const r=await worker.fetch(request('/orders/checkout',{product_id:'api',purchase_id:'purchase_123'},{authorization:'Bearer <redacted>'}),h.env);assert.equal(r.status,401);assert.equal((await h.getOrder('purchase_123')).session_id,'cs_test_1')});
 test('checkout blocks unauthenticated request before order lookup',async()=>{const h=await ordersEnv();const r=await worker.fetch(request('/orders/checkout',{product_id:'api',purchase_id:'purchase_123'}),h.env);assert.equal(r.status,401);assert.equal((await h.getOrder('purchase_123')).status,'pending')});
