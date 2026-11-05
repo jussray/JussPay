@@ -1,3 +1,5 @@
+import {createTestOrder,planEntitlement,orderStatus,checkoutTestSubscription,checkoutOneTimeOrder,orderWebhook,validatePurchase,testKey} from './subscriptions.mjs';
+export {validatePurchase};
 const ACCOUNT = 'acct_1U4xNyRs4gw4sfJH';
 export const PRODUCTS = Object.freeze({promptos:'PromptOS',chief:'Chief',thinktank:'Think Tank',sol:'SolContinuity',fcr:'Founder Control Room'});
 export const PRODUCT_IDS=Object.freeze({promptos:'prod_VZSVPKfsqwNYrQ',chief:'prod_VZSVv3oRoIAd8k',thinktank:'prod_VZSV48t06PDhP6',sol:'prod_VZSVrCa3mDPDtl',fcr:'prod_VZSVoNjmYqE90K'});
@@ -72,6 +74,8 @@ export default {async fetch(request,env){try{
   if(url.pathname==='/catalog' && request.method==='GET'){
     const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({id,name,purchaseStatus:operational&&catalog[id]?'requires_provider_validation':'unavailable',providerAvailabilityVerified:false,offerConfigured:Boolean(catalog[id]),...(catalog[id]?{unitAmount:catalog[id].unitAmount,currency:catalog[id].currency,interval:catalog[id].interval,termsUrl:catalog[id].termsUrl,entitlements:catalog[id].entitlements}:{})})));
   }
+  const ORDER_PATHS=['/subscriptions/orders','/subscriptions/checkout','/subscriptions/status','/subscriptions/entitlement','/orders/checkout'];
+  if(ORDER_PATHS.includes(url.pathname) && env.PAYMENTS_ENABLED!=='true')return json({error:'payments_disabled'},503);
   ready(env,url.pathname==='/webhook');
   if(url.pathname==='/webhook' && request.method==='POST'){
     const raw=await boundedText(request,262144);
@@ -90,10 +94,18 @@ export default {async fetch(request,env){try{
     await account(env);
     const customer=await stripe(env,`customers/${encodeURIComponent(customerId)}`);
     if(customer.livemode!==(env.STRIPE_LIVE==='true'))fail(400,'wrong_customer_mode');
-    const subject=customer.metadata?.jusspay_subject;
+    const subject=customer.metadata?.jusspay_subject||(typeof object?.metadata?.jusspay_subject==='string' && object?.metadata?.purchase_id ? object.metadata.jusspay_subject : undefined);
     // Unrelated account activity is acknowledged without exposing or assigning access.
     if(typeof subject!=='string'||!subject.length)return json({received:true,ignored:true});
     return routeUser(env,subject,'/event',{event,customerId});
+  }
+  if(ORDER_PATHS.includes(url.pathname)){
+    const wantMethod=(url.pathname==='/subscriptions/status'||url.pathname==='/subscriptions/entitlement')?'GET':'POST';
+    if(request.method!==wantMethod)return json({error:'method_not_allowed'},405);
+    const subject=await identity(request,env);
+    const query=Object.fromEntries(url.searchParams);
+    if(request.method==='POST'){const raw=await boundedText(request,4096);return routeUser(env,subject,url.pathname,{raw,query});}
+    return routeUser(env,subject,url.pathname,{query});
   }
   if(!['/checkout','/portal','/entitlements'].includes(url.pathname))return json({error:'not_found'},404);
   if(request.method!==(url.pathname==='/entitlements'?'GET':'POST'))return json({error:'method_not_allowed'},405);
@@ -113,6 +125,7 @@ export class BillingAccount {
     if(!existing)await this.state.storage.put('subject',input.subject);
     if(path==='/event')return await this.event(input);
     if(path==='/entitlements')return json({entitlements:await this.readEntitlements()});
+    if(path.startsWith('/subscriptions/')||path==='/orders/checkout')return await this.orderRoute(path,input);
     if(!['/checkout','/portal'].includes(path))fail(404,'not_found');
     const catalog=plans(this.env);
     const selectedPlan=path==='/checkout'&&Object.hasOwn(catalog,input.product)?catalog[input.product]:null;
@@ -173,7 +186,52 @@ export class BillingAccount {
     const until=item?.current_period_end || s.current_period_end || 0;
     return {status:s.status,row:{product:product||null,priceId:item?.price?.id||null,active:Boolean(p && s.status==='active' && item?.price?.id===p.priceId && item.quantity===1 && until>Date.now()/1000),entitlements:p?.entitlements||[],until}};
   }
+  orderStore(){
+    const storage=this.state.storage;
+    const list=async()=>{const idx=(await storage.get('order:index'))||[];const rows=[];for(const id of idx){const r=await storage.get(`order:${id}`);if(r)rows.push(r);}return rows;};
+    return {
+      getOrder:async id=>(await storage.get(`order:${id}`))||null,
+      putOrder:async row=>{const idx=(await storage.get('order:index'))||[];if(!idx.includes(row.id)){idx.push(row.id);await storage.put('order:index',idx);}await storage.put(`order:${row.id}`,row);},
+      listOrders:list,
+      findOrderBySubscription:async subId=>{for(const r of await list())if(r.subscription_id===subId)return r;return null;},
+      latestOrderForPlan:async plan=>{const rows=(await list()).filter(r=>r.plan===plan);return rows.length?rows[rows.length-1]:null;},
+      findLiveOrder:async plan=>{const rows=(await list()).filter(r=>r.plan===plan && ['pending','paid'].includes(r.status) && ['pending','active','past_due'].includes(r.subscription_state));return rows.length?rows[rows.length-1]:null;}
+    };
+  }
+  async orderEvent(event){
+    const o=event.data?.object||{};
+    if(['checkout.session.completed','checkout.session.async_payment_succeeded'].includes(event.type)){
+      if(!o.metadata?.purchase_id)return null;
+    }else if(['invoice.paid','invoice.payment_failed','customer.subscription.deleted'].includes(event.type)){
+      const subId=event.type==='customer.subscription.deleted'?o.id:(typeof o.subscription==='string'?o.subscription:null);
+      if(!subId || !await this.orderStore().findOrderBySubscription(subId))return null;
+    }else return null;
+    const r=await orderWebhook(this.orderStore(),this.env,this.env.STRIPE_FETCH||fetch,event);
+    if(r && event.type.startsWith('checkout.session.') && r.status===200 && typeof o.customer==='string' && !await this.state.storage.get('customer'))await this.state.storage.put('customer',o.customer);
+    return r?json(r.body,r.status):null;
+  }
+  async orderRoute(path,input){
+    const env=this.env,store=this.orderStore(),fetchImpl=env.STRIPE_FETCH||fetch;
+    const gated=()=>env.SUBSCRIPTIONS_TEST_ENABLED!=='true'?json({error:'subscriptions_not_enabled'},503):!testKey(env)?json({error:'test_key_required'},503):null;
+    const parseRaw=()=>{const raw=input.raw||'';if(raw.length>2048)return {error:json({error:'request_too_large'},413)};try{return {value:JSON.parse(raw)};}catch{return {error:json({error:'invalid_json'},400)};}};
+    let r;
+    if(path==='/subscriptions/orders'||path==='/subscriptions/checkout'){
+      const gate=gated();if(gate)return gate;
+      const parsed=parseRaw();if(parsed.error)return parsed.error;
+      r=path==='/subscriptions/orders'?await createTestOrder(store,input.subject,parsed.value):await checkoutTestSubscription(store,env,fetchImpl,input.subject,parsed.value,await this.state.storage.get('customer'));
+    }else if(path==='/subscriptions/entitlement'||path==='/subscriptions/status'){
+      const gate=gated();if(gate)return gate;
+      r=path==='/subscriptions/entitlement'?await planEntitlement(store,input.query?.plan):await orderStatus(store,input.query?.purchase_id);
+    }else if(path==='/orders/checkout'){
+      const parsed=(()=>{try{return {value:JSON.parse(input.raw||'{}')};}catch{return {error:json({error:'invalid_json'},400)};}})();
+      if(parsed.error)return parsed.error;
+      r=await checkoutOneTimeOrder(store,env,fetchImpl,parsed.value);
+    }else return json({error:'not_found'},404);
+    return json(r.body,r.status);
+  }
   async event({event,customerId,subject}){
+    const orderResult=await this.orderEvent(event);
+    if(orderResult)return orderResult;
     if(await this.state.storage.get(`event:${event.id}`))return json({received:true,duplicate:true});
     const existingCustomer=await this.state.storage.get('customer');if(existingCustomer && existingCustomer!==customerId)fail(403,'customer_mismatch');
     let subscription;
