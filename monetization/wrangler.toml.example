@@ -1,0 +1,25 @@
+name = "jussco-paid-api"
+main = "src/worker.mjs"
+compatibility_date = "2026-10-01"
+
+# Configure a dedicated hostname AFTER testing, e.g. paid.jussco.company.
+# Do not attach a route to /api/* on an existing app or to any checkout path.
+[vars]
+PUBLIC_BASE_URL = "https://REPLACE_WITH_NEW_DEDICATED_HOST"
+STRIPE_PRICE_ID = "price_REPLACE_ME"
+# Configure the approved fixed one-time Price amount in Stripe minor currency units.
+# Example only: 300 represents $3.00 USD; MUST match the exact Stripe Price.
+STRIPE_EXPECTED_AMOUNT_MINOR = "REPLACE_WITH_APPROVED_POSITIVE_INTEGER"
+STRIPE_EXPECTED_CURRENCY = "usd"
+CREDITS_PER_PURCHASE = "100"
+# Both are disabled by default. Do not enable until reviewed and explicitly approved.
+CHECKOUT_ENABLED = "false"
+PREMIUM_ENABLED = "false"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jussco_paid_api"
+database_id = "REPLACE_WITH_NEW_D1_DATABASE_ID"
+
+# STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET MUST be configured using
+# wrangler secret put / environment secrets. Never put keys in this file.

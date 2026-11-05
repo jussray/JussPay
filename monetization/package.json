@@ -1,0 +1,8 @@
+{
+  "name": "jussco-dual-monetization-starter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {"test": "node --test test/*.test.mjs"},
+  "description": "Isolated Stripe-prepaid Cloudflare Worker with optional future native x402 integration"
+}
