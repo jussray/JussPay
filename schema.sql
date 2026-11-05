@@ -17,3 +17,5 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_merchant ON orders(merchant_id,status);
 
 CREATE INDEX IF NOT EXISTS idx_orders_subscription ON orders(subscription_id);
+-- One active or pending membership per account and model; one-time orders have plan NULL.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_active_member ON orders(customer_id,plan) WHERE plan IN ('one','two') AND status IN ('pending','paid') AND subscription_state IN ('pending','active','past_due');

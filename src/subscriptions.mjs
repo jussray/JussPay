@@ -4,6 +4,7 @@ export const TEST_PLANS=Object.freeze({
   one:Object.freeze({id:"one",product_id:"protect-model-one",merchant_id:"jussco",stripe_product_id:"prod_VZRcwIn9d0aHqX",price_id:"price_1UYIjBRs4gw4sfJHThjLPcpS",amount:499,currency:"usd",origin:"https://protect.jussco.company"}),
   two:Object.freeze({id:"two",product_id:"protect-model-two",merchant_id:"jussco",stripe_product_id:"prod_VZRc42RZZVrCS9",price_id:"price_1UYIjDRs4gw4sfJHm94eRNsJ",amount:1900,currency:"usd",origin:"https://protect2.jussco.company"})
 });
+const getPlan=key=>key==="one"?TEST_PLANS.one:key==="two"?TEST_PLANS.two:null;
 const respond=(data,status=200)=>Response.json(data,{status,headers:{"cache-control":"no-store","x-content-type-options":"nosniff"}});
 const testKey=env=>/^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY||"");
 const bearer=req=>{const a=req.headers.get("authorization")||"";return a.startsWith("Bearer ")&&a.length>12?a:null};
@@ -56,6 +57,32 @@ export async function subscriptionRequest(req,env,fetchImpl=fetch){
   const subject=await principal(req,env);
   if(!subject)return respond({error:"authenticated_account_required"},401);
   const url=new URL(req.url);
+  if(req.method==="POST"&&url.pathname==="/subscriptions/orders"){
+    if(Number(req.headers.get('content-length')||0)>2048)return respond({error:'request_too_large'},413);
+    let input;try{input=await req.text();if(input.length>2048)return respond({error:'request_too_large'},413);input=JSON.parse(input);}catch{return respond({error:"invalid_json"},400)}
+    const plan=getPlan(input?.plan);
+    if(!plan)return respond({error:"invalid_plan"},400);
+    let existing;
+    try{existing=await env.ORDERS.prepare("SELECT id FROM orders WHERE customer_id=? AND plan=? AND status IN ('pending','paid') AND subscription_state IN ('pending','active','past_due') ORDER BY rowid DESC LIMIT 1").bind(subject,plan.id).first();}
+    catch{return respond({error:"orders_unavailable"},503)}
+    if(existing)return respond({purchase_id:existing.id,plan:plan.id,amount_minor:plan.amount,currency:plan.currency,test_mode:true,reused:true});
+    const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
+    const purchaseId="purchase_"+[...bytes].map(v=>v.toString(16).padStart(2,"0")).join("");
+    try{
+      await env.ORDERS.prepare("INSERT INTO orders(id,product_id,merchant_id,customer_id,currency,amount_total,status,plan,price_id,subscription_state) VALUES(?,?,?,?,?,?,'pending',?,?,'pending')")
+        .bind(purchaseId,plan.product_id,plan.merchant_id,subject,plan.currency,plan.amount,plan.id,plan.price_id).run();
+    }catch{return respond({error:"order_conflict_or_unavailable"},409)}
+    return respond({purchase_id:purchaseId,plan:plan.id,amount_minor:plan.amount,currency:plan.currency,test_mode:true},201);
+  }
+  if(req.method==="GET"&&url.pathname==="/subscriptions/entitlement"){
+    const plan=getPlan(url.searchParams.get("plan"));
+    if(!plan)return respond({error:"invalid_plan"},400);
+    let order;
+    try{order=await env.ORDERS.prepare("SELECT status,subscription_state FROM orders WHERE customer_id=? AND plan=? ORDER BY rowid DESC LIMIT 1").bind(subject,plan.id).first();}
+    catch{return respond({error:"orders_unavailable"},503)}
+    const state=order?.subscription_state||"not_subscribed";
+    return respond({plan:plan.id,billing_state:state,billing_active:order?.status==="paid"&&state==="active",service_activation:"not_verified",test_mode:true});
+  }
   if(req.method==="GET"&&url.pathname==="/subscriptions/status"){
     const id=url.searchParams.get("purchase_id")||"";
     if(!/^[A-Za-z0-9_-]{8,100}$/.test(id))return respond({error:"invalid_order"},400);
@@ -64,8 +91,9 @@ export async function subscriptionRequest(req,env,fetchImpl=fetch){
     return respond({purchase_id:order.id,product_id:order.product_id,billing_state:order.subscription_state||"pending",test_mode:true});
   }
   if(req.method!=="POST"||url.pathname!=="/subscriptions/checkout")return respond({error:"not_found"},404);
-  let input;try{input=await req.json()}catch{return respond({error:"invalid_json"},400)}
-  const plan=TEST_PLANS[input?.plan];
+  if(Number(req.headers.get('content-length')||0)>2048)return respond({error:'request_too_large'},413);
+    let input;try{input=await req.text();if(input.length>2048)return respond({error:'request_too_large'},413);input=JSON.parse(input);}catch{return respond({error:"invalid_json"},400)}
+  const plan=getPlan(input?.plan);
   if(!plan||! /^[A-Za-z0-9_-]{8,100}$/.test(input?.purchase_id||""))return respond({error:"invalid_plan_or_order"},400);
   const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=? AND customer_id=?").bind(input.purchase_id,subject).first();
   if(!order||order.status!=="pending"||order.plan!==input.plan||
@@ -114,7 +142,7 @@ export async function subscriptionWebhook(event,env,fetchImpl=fetch){
   if(["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type)){
     if(data.payment_status!=="paid")return respond({received:true});
     const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=?").bind(data.client_reference_id||"").first();
-    const plan=order?TEST_PLANS[order.plan]:null;
+    const plan=order?getPlan(order.plan):null;
     if(!plan||order.session_id!==data.id)return respond({error:"unknown_subscription_order"},409);
     if(order.status==="paid"&&order.subscription_state!=="pending")return respond({received:true,duplicate:true});
     if(order.status!=="pending")return respond({error:"order_state_conflict"},409);
@@ -140,7 +168,7 @@ export async function subscriptionWebhook(event,env,fetchImpl=fetch){
     (typeof data.subscription==="string"?data.subscription:null);
   if(typeof subscriptionId!=="string"||!subscriptionId.startsWith("sub_"))return respond({received:true});
   const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE subscription_id=?").bind(subscriptionId).first();
-  if(!order||!TEST_PLANS[order.plan])return respond({received:true});
+  if(!order||!getPlan(order.plan))return respond({received:true});
   if(event.type==="customer.subscription.deleted"||event.type==="invoice.payment_failed"){
     const next=event.type==="customer.subscription.deleted"?"canceled":"past_due";
     // A duplicate or out-of-order failure must not reactivate a subscription.
@@ -153,7 +181,7 @@ export async function subscriptionWebhook(event,env,fetchImpl=fetch){
     let subscription;
     try{subscription=await fromStripe(env,"subscriptions/"+encodeURIComponent(subscriptionId),fetchImpl)}
     catch{return respond({error:"renewal_verification_unavailable"},503)}
-    const p=TEST_PLANS[order.plan],item=subscription.items?.data?.[0];
+    const p=getPlan(order.plan),item=subscription.items?.data?.[0];
     if(subscription.livemode!==false||subscription.status!=="active"||subscription.customer!==order.stripe_customer_id||
        item?.price?.id!==p.price_id||item.quantity!==1)return respond({error:"renewal_mismatch"},409);
     await env.ORDERS.prepare("UPDATE orders SET subscription_state='active' WHERE id=? AND subscription_id=? AND subscription_state='past_due'")

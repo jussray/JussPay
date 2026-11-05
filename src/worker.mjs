@@ -18,7 +18,7 @@ export default {async fetch(req,env){
  const url=new URL(req.url);
  if(url.pathname==="/health"&&req.method==="GET")return json({service:"jusspay",payments:"disabled"});
  if(env.PAYMENTS_ENABLED!=="true")return json({error:"payments_disabled"},503);
- if(url.pathname==="/subscriptions/checkout"||url.pathname==="/subscriptions/status")return subscriptionRequest(req,env);
+ if(url.pathname==="/subscriptions/checkout"||url.pathname==="/subscriptions/status"||url.pathname==="/subscriptions/orders"||url.pathname==="/subscriptions/entitlement")return subscriptionRequest(req,env);
  if(url.pathname==="/checkout"&&req.method==="POST"){
   if(!env.STRIPE_SECRET_KEY?.startsWith("rk_test_")&&!env.STRIPE_SECRET_KEY?.startsWith("sk_test_"))return json({error:"sandbox_key_required"},503);
   if(!env.STRIPE_SECRET_KEY||!env.CATALOG||!env.APP_ORIGIN||!env.ORDERS)return json({error:"not_configured"},503);

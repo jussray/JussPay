@@ -176,3 +176,66 @@ test('a paid subscription is not a completed Protect Me activation without downs
     assert.equal('protection_active' in status,false);
   });
 });
+
+
+test('verified customer can create a server-priced order once, without supplying price or customer id',async()=>{
+  const e={...env()};
+  e.ORDERS.db.prepare('DELETE FROM orders').run();
+  const first=await app.fetch(request('/subscriptions/orders','POST',{plan:'one',amount:1,customer_id:'attacker'}),e);
+  assert.equal(first.status,201);
+  const body=await first.json();
+  assert.match(body.purchase_id,/^purchase_[a-f0-9]{32}$/);
+  assert.equal(body.amount_minor,499);
+  const stored=e.ORDERS.db.prepare('SELECT customer_id,amount_total,price_id,plan,subscription_state FROM orders WHERE id=?').get(body.purchase_id);
+  assert.equal(stored.customer_id,'customer_1');
+  assert.equal(stored.amount_total,499);
+  assert.equal(stored.price_id,TEST_PLANS.one.price_id);
+  assert.equal(stored.plan,'one');
+  assert.equal(stored.subscription_state,'pending');
+  const again=await app.fetch(request('/subscriptions/orders','POST',{plan:'one'}),e);
+  assert.equal((await again.json()).purchase_id,body.purchase_id);
+  assert.equal(e.ORDERS.db.prepare("SELECT COUNT(*) AS count FROM orders WHERE plan='one'").get().count,1);
+});
+test('another customer cannot read or reuse a pending order or claim entitlement',async()=>{
+ const e=env('two');
+ const different={...e,AUTH_SERVICE:{fetch:async()=>Response.json({subject:'customer_2'})}};
+ const status=await app.fetch(statusRequest(),different);
+ assert.equal(status.status,404);
+ const ent=await app.fetch(request('/subscriptions/entitlement?plan=two','GET'),different);
+ assert.equal(ent.status,200);
+ assert.equal((await ent.json()).billing_active,false);
+ const unauthorized=await app.fetch(request('/subscriptions/orders','POST',{plan:'one'},false),e);
+ assert.equal(unauthorized.status,401);
+});
+test('membership billing entitlement never implies installed or connected protection',async()=>{
+ const e=env(),p=TEST_PLANS.two,mock=mockStripe(p);
+ const before=await (await app.fetch(request('/subscriptions/entitlement?plan=two','GET'),e)).json();
+ assert.equal(before.billing_active,false);
+ await withFetch(mock.fetch,async()=>{
+   assert.equal((await app.fetch(request('/subscriptions/checkout'),e)).status,200);
+   assert.equal((await app.fetch(await sign(completion(p)),e)).status,200);
+ });
+ const paid=await (await app.fetch(request('/subscriptions/entitlement?plan=two','GET'),e)).json();
+ assert.equal(paid.billing_active,true);
+ assert.equal(paid.service_activation,'not_verified');
+ assert.equal('api_key' in paid,false);
+ assert.equal('protection_active' in paid,false);
+ assert.equal((await (await app.fetch(request('/subscriptions/entitlement?plan=one','GET'),e)).json()).billing_active,false);
+ await app.fetch(await signedEvent('customer.subscription.deleted',{id:'sub_test_123'}),e);
+ const canceled=await (await app.fetch(request('/subscriptions/entitlement?plan=two','GET'),e)).json();
+ assert.equal(canceled.billing_active,false);
+});
+test('database prevents duplicate pending or active membership even under simultaneous writers',()=>{
+ const e=env('one'),p=TEST_PLANS.one;
+ assert.throws(()=>e.ORDERS.db.prepare("INSERT INTO orders(id,product_id,merchant_id,customer_id,currency,amount_total,status,plan,price_id,subscription_state) VALUES('purchase_other',?,?,?,?,?,'pending',?,?,'pending')").run(p.product_id,p.merchant_id,'customer_1',p.currency,p.amount,p.id,p.price_id),/UNIQUE constraint failed/);
+});
+
+test('malformed plan name and oversized payload fail closed rather than inheriting object properties',async()=>{
+  const e=env();
+  const malicious=await app.fetch(request('/subscriptions/orders','POST',{plan:'__proto__'}),e);
+  assert.equal(malicious.status,400);
+  const badEnt=await app.fetch(request('/subscriptions/entitlement?plan=constructor','GET'),e);
+  assert.equal(badEnt.status,400);
+  const huge=await app.fetch(request('/subscriptions/orders','POST',{plan:'one',note:'x'.repeat(3000)}),e);
+  assert.equal(huge.status,413);
+});
