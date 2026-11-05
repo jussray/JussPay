@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/worker.mjs && node --check test/worker.test.mjs"
+    "check": "node --check src/worker.mjs && node --check src/subscriptions.mjs && node --check test/worker.test.mjs && node --check test/subscriptions.test.mjs"
   }
 }

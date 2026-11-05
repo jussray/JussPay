@@ -1,3 +1,4 @@
+import {subscriptionRequest,isSubscriptionEvent,subscriptionWebhook} from "./subscriptions.mjs";
 const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"content-type":"application/json","cache-control":"no-store"}});
 const allowed=(url,base)=>{try{const u=new URL(url);return u.origin===new URL(base).origin&&u.protocol==="https:"}catch{return false}};
 const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
@@ -17,6 +18,7 @@ export default {async fetch(req,env){
  const url=new URL(req.url);
  if(url.pathname==="/health"&&req.method==="GET")return json({service:"jusspay",payments:"disabled"});
  if(env.PAYMENTS_ENABLED!=="true")return json({error:"payments_disabled"},503);
+ if(url.pathname==="/subscriptions/checkout"||url.pathname==="/subscriptions/status")return subscriptionRequest(req,env);
  if(url.pathname==="/checkout"&&req.method==="POST"){
   if(!env.STRIPE_SECRET_KEY?.startsWith("rk_test_")&&!env.STRIPE_SECRET_KEY?.startsWith("sk_test_"))return json({error:"sandbox_key_required"},503);
   if(!env.STRIPE_SECRET_KEY||!env.CATALOG||!env.APP_ORIGIN||!env.ORDERS)return json({error:"not_configured"},503);
@@ -52,6 +54,7 @@ export default {async fetch(req,env){
   const body=await req.text();
   if(!await verifySignature(body,req.headers.get("stripe-signature"),env.STRIPE_WEBHOOK_SECRET))return json({error:"invalid_signature"},400);
   let event;try{event=JSON.parse(body)}catch{return json({error:"invalid_json"},400)}
+  if(isSubscriptionEvent(event))return subscriptionWebhook(event,env);
   if(!["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type))return json({received:true});
   const s=event.data?.object;
   if(!s?.id||s.payment_status!=="paid")return json({received:true});
