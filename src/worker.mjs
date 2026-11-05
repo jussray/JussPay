@@ -145,7 +145,7 @@ export class BillingAccount {
     const p=selectedPlan;
     const rights=await this.readEntitlements();if(rights.some(x=>x.product===input.product))fail(409,'already_subscribed');
     const price=await stripe(this.env,`prices/${encodeURIComponent(p.priceId)}?expand%5B%5D=product`);
-    if(!price.product?.active || price.product.livemode!==(this.env.STRIPE_LIVE==='true') || price.product?.id!==stripeConfiguration(this.env).products[input.product] || !price.active || price.livemode!==(this.env.STRIPE_LIVE==='true') || price.unit_amount!==p.unitAmount || price.currency!==p.currency || price.recurring?.interval!==p.interval || price.recurring?.interval_count!==1)fail(503,'price_configuration_mismatch');
+    if(!price.product?.active || price.product.livemode!==(this.env.STRIPE_LIVE==='true') || price.product?.id!==stripeConfiguration(this.env).products[input.product] || !price.active || price.livemode!==(this.env.STRIPE_LIVE==='true') || price.unit_amount!==p.unitAmount || price.currency!==p.currency || price.recurring?.interval!==p.interval || price.recurring?.interval_count!==1 || price.recurring?.usage_type==='metered')fail(503,'price_configuration_mismatch');
     const fingerprint=await digest(JSON.stringify([p.priceId,p.unitAmount,p.currency,p.interval,p.entitlements,p.termsUrl,this.env.APP_ORIGIN]));
     let attempt=await this.state.storage.get(`checkout:${input.product}`);
     // Upgrade any pre-release string receipt to an explicit attempt record.
