@@ -1,9 +1,1 @@
-{
-  "name": "jusspay-worker",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node --test",
-    "check": "node --check src/worker.mjs && node --check src/subscriptions.mjs && node --check test/worker.test.mjs && node --check test/subscriptions.test.mjs"
-  }
-}
+{"engines":{"node":">=22"},"name":"jusspay","private":true,"scripts":{"check":"node --check src/worker.mjs && node --check src/auth-supabase.mjs && node --check src/subscriptions.mjs && node --check test/auth.test.mjs && node --check test/security.test.mjs && node --check test/subscriptions.test.mjs && node --check test/orders.test.mjs && node --check monetization/src/worker.mjs","test":"node --test test/*.test.mjs monetization/test/*.test.mjs"},"type":"module"}

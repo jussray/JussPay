@@ -1,3 +1,22 @@
+// Order + subscription lifecycle, harvested from PR #1 (chore/payment-safety-contract-20261029)
+// into the canonical JussPay core by the 2026-11-05 design merge (see docs/DESIGN-MERGE.md).
+//
+// Storage decision: order and subscription state lives in the per-subject BillingAccount
+// Durable Object (src/worker.mjs), which is the single source of truth for subscription and
+// entitlement state. The lifecycle functions below run against a small store interface
+// implemented by that Durable Object over its own storage:
+//   getOrder(id)              -> row | null
+//   putOrder(row)             -> persists the row (throws on storage failure)
+//   listOrders()              -> all rows for the subject, insertion order
+//   findOrderBySubscription(id) -> row | null
+//   latestOrderForPlan(plan)  -> most recent row for the plan | null
+//   findLiveOrder(plan)       -> most recent row with status in (pending, paid) and
+//                                subscription_state in (pending, active, past_due) | null
+// A row mirrors the columns of PR #1's D1 `orders` table (preserved for reference in
+// docs/legacy-orders-schema.sql) plus its owning subject as customer_id. The D1 partial
+// unique index that enforced "one live membership per customer and plan" is replaced by
+// the Durable Object's serialized execution: check-and-insert is atomic per subject.
+//
 // Test-only recurring membership contract shared by Protect Me Model One and Model Two.
 // No live Stripe key, anonymous checkout, public entitlement, or customer credentials.
 export const TEST_PLANS=Object.freeze({
@@ -5,19 +24,9 @@ export const TEST_PLANS=Object.freeze({
   two:Object.freeze({id:"two",product_id:"protect-model-two",merchant_id:"jussco",stripe_product_id:"prod_VZRc42RZZVrCS9",price_id:"price_1UYIjDRs4gw4sfJHm94eRNsJ",amount:1900,currency:"usd",origin:"https://protect2.jussco.company"})
 });
 const getPlan=key=>key==="one"?TEST_PLANS.one:key==="two"?TEST_PLANS.two:null;
-const respond=(data,status=200)=>Response.json(data,{status,headers:{"cache-control":"no-store","x-content-type-options":"nosniff"}});
-const testKey=env=>/^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY||"");
-const bearer=req=>{const a=req.headers.get("authorization")||"";return a.startsWith("Bearer ")&&a.length>12?a:null};
-async function principal(req,env){
-  const token=bearer(req);
-  if(!token||env.CHECKOUT_AUTH_READY!=="true"||!env.AUTH_SERVICE)return null;
-  let response;
-  try{response=await env.AUTH_SERVICE.fetch(new Request("https://auth.internal/verify",{method:"POST",headers:{authorization:token}}));}
-  catch{return null;}
-  if(!response.ok)return null;
-  try{const data=await response.json();return typeof data?.subject==="string"&&data.subject.length>0?data.subject:null;}
-  catch{return null;}
-}
+export {getPlan};
+export const testKey=env=>/^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY||"");
+const result=(status,body)=>({status,body});
 async function fromStripe(env,path,fetchImpl){
   const response=await fetchImpl("https://api.stripe.com/v1/"+path,{headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY}});
   if(!response.ok)throw new Error("stripe_read_unavailable");
@@ -50,142 +59,200 @@ export function subscriptionMatches(session,order,plan,items,subscription){
     subItem.quantity===1&&subItem.price?.id===plan.price_id&&
     subItem.price?.currency===plan.currency&&subItem.price?.unit_amount===plan.amount);
 }
-export async function subscriptionRequest(req,env,fetchImpl=fetch){
-  if(env.SUBSCRIPTIONS_TEST_ENABLED!=="true")return respond({error:"subscriptions_not_enabled"},503);
-  if(!testKey(env))return respond({error:"test_key_required"},503);
-  if(!env.ORDERS)return respond({error:"orders_not_configured"},503);
-  const subject=await principal(req,env);
-  if(!subject)return respond({error:"authenticated_account_required"},401);
-  const url=new URL(req.url);
-  if(req.method==="POST"&&url.pathname==="/subscriptions/orders"){
-    if(Number(req.headers.get('content-length')||0)>2048)return respond({error:'request_too_large'},413);
-    let input;try{input=await req.text();if(input.length>2048)return respond({error:'request_too_large'},413);input=JSON.parse(input);}catch{return respond({error:"invalid_json"},400)}
-    const plan=getPlan(input?.plan);
-    if(!plan)return respond({error:"invalid_plan"},400);
-    let existing;
-    try{existing=await env.ORDERS.prepare("SELECT id FROM orders WHERE customer_id=? AND plan=? AND status IN ('pending','paid') AND subscription_state IN ('pending','active','past_due') ORDER BY rowid DESC LIMIT 1").bind(subject,plan.id).first();}
-    catch{return respond({error:"orders_unavailable"},503)}
-    if(existing)return respond({purchase_id:existing.id,plan:plan.id,amount_minor:plan.amount,currency:plan.currency,test_mode:true,reused:true});
-    const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
-    const purchaseId="purchase_"+[...bytes].map(v=>v.toString(16).padStart(2,"0")).join("");
-    try{
-      await env.ORDERS.prepare("INSERT INTO orders(id,product_id,merchant_id,customer_id,currency,amount_total,status,plan,price_id,subscription_state) VALUES(?,?,?,?,?,?,'pending',?,?,'pending')")
-        .bind(purchaseId,plan.product_id,plan.merchant_id,subject,plan.currency,plan.amount,plan.id,plan.price_id).run();
-    }catch{return respond({error:"order_conflict_or_unavailable"},409)}
-    return respond({purchase_id:purchaseId,plan:plan.id,amount_minor:plan.amount,currency:plan.currency,test_mode:true},201);
-  }
-  if(req.method==="GET"&&url.pathname==="/subscriptions/entitlement"){
-    const plan=getPlan(url.searchParams.get("plan"));
-    if(!plan)return respond({error:"invalid_plan"},400);
-    let order;
-    try{order=await env.ORDERS.prepare("SELECT status,subscription_state FROM orders WHERE customer_id=? AND plan=? ORDER BY rowid DESC LIMIT 1").bind(subject,plan.id).first();}
-    catch{return respond({error:"orders_unavailable"},503)}
-    const state=order?.subscription_state||"not_subscribed";
-    return respond({plan:plan.id,billing_state:state,billing_active:order?.status==="paid"&&state==="active",service_activation:"not_verified",test_mode:true});
-  }
-  if(req.method==="GET"&&url.pathname==="/subscriptions/status"){
-    const id=url.searchParams.get("purchase_id")||"";
-    if(!/^[A-Za-z0-9_-]{8,100}$/.test(id))return respond({error:"invalid_order"},400);
-    const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=? AND customer_id=?").bind(id,subject).first();
-    if(!order)return respond({error:"order_not_found"},404);
-    return respond({purchase_id:order.id,product_id:order.product_id,billing_state:order.subscription_state||"pending",test_mode:true});
-  }
-  if(req.method!=="POST"||url.pathname!=="/subscriptions/checkout")return respond({error:"not_found"},404);
-  if(Number(req.headers.get('content-length')||0)>2048)return respond({error:'request_too_large'},413);
-    let input;try{input=await req.text();if(input.length>2048)return respond({error:'request_too_large'},413);input=JSON.parse(input);}catch{return respond({error:"invalid_json"},400)}
+export function validatePurchase(session,order){
+ return !!(session&&order&&session.id===order.session_id&&session.payment_status==="paid"&&session.mode==="payment"&&session.currency===order.currency&&session.amount_total===order.amount_total&&session.metadata?.purchase_id===order.id&&session.metadata?.product_id===order.product_id&&session.metadata?.merchant_id===order.merchant_id&&session.client_reference_id===order.id);
+}
+export function isSubscriptionEvent(event){
+  return (["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event?.type)&&event.data?.object?.mode==="subscription")||
+    ["invoice.paid","invoice.payment_failed","customer.subscription.deleted"].includes(event?.type);
+}
+
+// POST /subscriptions/orders — create (or reuse) the subject's server-priced test-plan order.
+// Caller has already authenticated the subject and applied the subscriptions gates.
+export async function createTestOrder(store,subject,input){
   const plan=getPlan(input?.plan);
-  if(!plan||! /^[A-Za-z0-9_-]{8,100}$/.test(input?.purchase_id||""))return respond({error:"invalid_plan_or_order"},400);
-  const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=? AND customer_id=?").bind(input.purchase_id,subject).first();
+  if(!plan)return result(400,{error:"invalid_plan"});
+  const existing=await store.findLiveOrder(plan.id);
+  if(existing)return result(200,{purchase_id:existing.id,plan:plan.id,amount_minor:plan.amount,currency:plan.currency,test_mode:true,reused:true});
+  const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
+  const purchaseId="purchase_"+[...bytes].map(v=>v.toString(16).padStart(2,"0")).join("");
+  const row={id:purchaseId,product_id:plan.product_id,merchant_id:plan.merchant_id,customer_id:subject,currency:plan.currency,amount_total:plan.amount,session_id:null,status:"pending",plan:plan.id,price_id:plan.price_id,subscription_id:null,stripe_customer_id:null,subscription_state:"pending"};
+  try{await store.putOrder(row);}catch{return result(409,{error:"order_conflict_or_unavailable"});}
+  return result(201,{purchase_id:purchaseId,plan:plan.id,amount_minor:plan.amount,currency:plan.currency,test_mode:true});
+}
+
+// GET /subscriptions/entitlement?plan=one|two — billing state only; never a service activation.
+export async function planEntitlement(store,planKey){
+  const plan=getPlan(planKey);
+  if(!plan)return result(400,{error:"invalid_plan"});
+  let order;
+  try{order=await store.latestOrderForPlan(plan.id);}catch{return result(503,{error:"orders_unavailable"});}
+  const state=order?.subscription_state||"not_subscribed";
+  return result(200,{plan:plan.id,billing_state:state,billing_active:order?.status==="paid"&&state==="active",service_activation:"not_verified",test_mode:true});
+}
+
+// GET /subscriptions/status?purchase_id=... — the subject's own order (the store is per-subject,
+// so another subject's order is indistinguishable from a missing one: 404, as in PR #1).
+export async function orderStatus(store,purchaseId){
+  if(!/^[A-Za-z0-9_-]{8,100}$/.test(purchaseId||""))return result(400,{error:"invalid_order"});
+  const order=await store.getOrder(purchaseId);
+  if(!order)return result(404,{error:"order_not_found"});
+  return result(200,{purchase_id:order.id,product_id:order.product_id,billing_state:order.subscription_state||"pending",test_mode:true});
+}
+
+// POST /subscriptions/checkout — open a Stripe test subscription Checkout for a pending order.
+// `customerId` is the subject's JussPay-managed Stripe customer when one exists, so webhook
+// delivery routes back to the same BillingAccount via customer metadata; the session and
+// subscription metadata always carry jusspay_subject + purchase_id as a second route.
+export async function checkoutTestSubscription(store,env,fetchImpl,subject,input,customerId){
+  const plan=getPlan(input?.plan);
+  if(!plan||!/^[A-Za-z0-9_-]{8,100}$/.test(input?.purchase_id||""))return result(400,{error:"invalid_plan_or_order"});
+  const order=await store.getOrder(input.purchase_id);
   if(!order||order.status!=="pending"||order.plan!==input.plan||
      order.product_id!==plan.product_id||order.merchant_id!==plan.merchant_id||
      order.amount_total!==plan.amount||order.currency!==plan.currency)
-     return respond({error:"order_not_authorized"},403);
+     return result(403,{error:"order_not_authorized"});
   let price;
   try{price=await fromStripe(env,"prices/"+encodeURIComponent(plan.price_id),fetchImpl)}
-  catch{return respond({error:"stripe_price_unavailable"},503)}
-  if(!priceMatches(price,plan))return respond({error:"approved_monthly_price_mismatch"},503);
+  catch{return result(503,{error:"stripe_price_unavailable"})}
+  if(!priceMatches(price,plan))return result(503,{error:"approved_monthly_price_mismatch"});
   const params=new URLSearchParams({
     mode:"subscription","line_items[0][price]":plan.price_id,"line_items[0][quantity]":"1",
     client_reference_id:order.id,
     "metadata[purchase_id]":order.id,"metadata[product_id]":plan.product_id,
-    "metadata[merchant_id]":plan.merchant_id,
-    "subscription_data[metadata][purchase_id]":order.id,
+    "metadata[merchant_id]":plan.merchant_id,"metadata[jusspay_subject]":subject,
+    "subscription_data[metadata][purchase_id]":order.id,"subscription_data[metadata][jusspay_subject]":subject,
     success_url:plan.origin+"/checkout?test_payment=return",
     cancel_url:plan.origin+"/checkout?test_payment=canceled"
   });
+  if(customerId)params.set("customer",customerId);
   let response,session;
   try{
     response=await fetchImpl("https://api.stripe.com/v1/checkout/sessions",{
       method:"POST",headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY,
         "content-type":"application/x-www-form-urlencoded","idempotency-key":"jusspay-sub-"+order.id},body:params});
     session=await response.json();
-  }catch{return respond({error:"checkout_provider_unavailable"},503)}
+  }catch{return result(503,{error:"checkout_provider_unavailable"})}
   if(!response.ok||!/^cs_test_/.test(session?.id||"")||session?.mode!=="subscription"||
      !/^https:\/\/checkout\.stripe\.com\//.test(session?.url||""))
-     return respond({error:"invalid_checkout_response"},502);
+     return result(502,{error:"invalid_checkout_response"});
   let saved;
-  try{saved=await env.ORDERS.prepare("UPDATE orders SET session_id=?,price_id=? WHERE id=? AND customer_id=? AND status='pending' AND (session_id IS NULL OR session_id=?)")
-    .bind(session.id,plan.price_id,order.id,subject,session.id).run();}
-  catch{return respond({error:"checkout_state_unavailable"},503)}
-  if(saved.meta?.changes!==1)return respond({error:"checkout_state_conflict"},409);
-  return respond({checkout_url:session.url,plan:input.plan,monthly_amount_minor:plan.amount,currency:plan.currency,test_mode:true});
+  try{
+    const current=await store.getOrder(order.id);
+    if(!current||current.status!=="pending"||(current.session_id!==null&&current.session_id!==session.id))saved=false;
+    else{await store.putOrder({...current,session_id:session.id,price_id:plan.price_id});saved=true;}
+  }catch{return result(503,{error:"checkout_state_unavailable"})}
+  if(!saved)return result(409,{error:"checkout_state_conflict"});
+  return result(200,{checkout_url:session.url,plan:input.plan,monthly_amount_minor:plan.amount,currency:plan.currency,test_mode:true});
 }
-export function isSubscriptionEvent(event){
-  return (["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event?.type)&&event.data?.object?.mode==="subscription")||
-    ["invoice.paid","invoice.payment_failed","customer.subscription.deleted"].includes(event?.type);
+
+// POST /orders/checkout — PR #1's one-time, pre-authorized order checkout (sandbox keys only).
+// Orders are created outside this route (PR #1 required a separate authenticated service;
+// test-plan orders are created by createTestOrder). Prices come only from the server catalog.
+export async function checkoutOneTimeOrder(store,env,fetchImpl,input){
+  if(!testKey(env))return result(503,{error:"sandbox_key_required"});
+  if(!env.STRIPE_SECRET_KEY||!env.CATALOG||!env.APP_ORIGIN)return result(503,{error:"not_configured"});
+  if(typeof input?.product_id!=="string"||typeof input?.purchase_id!=="string"||!/^[a-zA-Z0-9_-]{8,100}$/.test(input.purchase_id))return result(400,{error:"invalid_request"});
+  let catalog;try{catalog=JSON.parse(env.CATALOG)}catch{return result(503,{error:"catalog_misconfigured"})}
+  const product=catalog?.[input.product_id];
+  if(!product||!Number.isSafeInteger(product.amount)||product.amount<=0||!/^[a-z]{3}$/.test(product.currency)||!product.merchant_id)return result(400,{error:"unknown_product"});
+  const order=await store.getOrder(input.purchase_id);
+  if(!order||order.product_id!==input.product_id||order.merchant_id!==product.merchant_id||order.amount_total!==product.amount||order.currency!==product.currency||order.status!=="pending")return result(403,{error:"order_not_authorized"});
+  const params=new URLSearchParams({mode:"payment",success_url:env.APP_ORIGIN+"/payment/return?session_id={CHECKOUT_SESSION_ID}",cancel_url:env.APP_ORIGIN+"/payment/cancel",client_reference_id:order.id,"line_items[0][price_data][currency]":product.currency,"line_items[0][price_data][unit_amount]":String(product.amount),"line_items[0][price_data][product_data][name]":product.name,"line_items[0][quantity]":"1","metadata[purchase_id]":order.id,"metadata[product_id]":order.product_id,"metadata[merchant_id]":order.merchant_id});
+  let response;try{response=await fetchImpl("https://api.stripe.com/v1/checkout/sessions",{method:"POST",headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY,"content-type":"application/x-www-form-urlencoded","idempotency-key":"jusspay-"+order.id},body:params})}catch{return result(503,{error:"checkout_provider_unavailable"})}
+  if(!response.ok)return result(502,{error:"checkout_provider_error"});
+  let session;try{session=await response.json()}catch{return result(502,{error:"invalid_provider_response"})}
+  if(!session.id||!session.url)return result(502,{error:"invalid_provider_response"});
+  let saved;
+  try{
+    const current=await store.getOrder(order.id);
+    if(!current||current.status!=="pending"||(current.session_id!==null&&current.session_id!==session.id))saved=false;
+    else{await store.putOrder({...current,session_id:session.id});saved=true;}
+  }catch{return result(503,{error:"checkout_state_unavailable"})}
+  if(!saved)return result(409,{error:"checkout_state_conflict"});
+  return result(200,{checkout_url:session.url});
 }
-export async function subscriptionWebhook(event,env,fetchImpl=fetch){
-  if(env.SUBSCRIPTIONS_TEST_ENABLED!=="true"||!testKey(env))return respond({error:"subscriptions_not_enabled"},503);
-  if(!env.ORDERS)return respond({error:"orders_not_configured"},503);
-  if(event?.livemode!==false)return respond({error:"mode_mismatch"},400);
+
+// Webhook lifecycle for orders. Called by the BillingAccount event handler after the core
+// webhook pipeline (signature, mode, account, customer identity) has routed the event to the
+// owning subject. Returns a result for order events, or null when the event is not an order
+// event and the caller should apply the catalog-subscription path instead.
+export async function orderWebhook(store,env,fetchImpl,event){
+  if(isSubscriptionEvent(event))return subscriptionWebhook(store,env,fetchImpl,event);
+  if(!["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type))return null;
+  const s=event.data?.object;
+  if(!s?.id||s.payment_status!=="paid")return result(200,{received:true});
+  if(!s.metadata?.purchase_id)return null;
+  const order=await store.getOrder(s.client_reference_id||"");
+  if(!validatePurchase(s,order))return result(409,{error:"purchase_mismatch"});
+  // Provider readback is required: never trust a signed event payload alone.
+  if(!testKey(env))return result(503,{error:"sandbox_key_required"});
+  let current;
+  try{
+    const check=await fetchImpl("https://api.stripe.com/v1/checkout/sessions/"+encodeURIComponent(s.id),{headers:{authorization:"Bearer "+env.STRIPE_SECRET_KEY}});
+    if(!check.ok)return result(503,{error:"provider_reconciliation_failed"});
+    current=await check.json();
+  }catch{return result(503,{error:"provider_reconciliation_failed"})}
+  if(!validatePurchase(current,order))return result(409,{error:"provider_purchase_mismatch"});
+  // A local paid flag is not an entitlement; downstream fulfillment remains disabled.
+  try{
+    const latest=await store.getOrder(order.id);
+    if(!latest||latest.status!=="pending"||latest.session_id!==s.id){
+      if(!latest||latest.status!=="paid"||!validatePurchase(current,latest))return result(409,{error:"reconciliation_state_conflict"});
+    }else{
+      await store.putOrder({...latest,status:"paid"});
+    }
+  }catch{return result(503,{error:"reconciliation_persist_failed"})}
+  return result(200,{received:true});
+}
+
+async function subscriptionWebhook(store,env,fetchImpl,event){
+  if(env.SUBSCRIPTIONS_TEST_ENABLED!=="true"||!testKey(env))return result(503,{error:"subscriptions_not_enabled"});
+  if(event?.livemode!==false)return result(400,{error:"mode_mismatch"});
   const data=event.data?.object||{};
   if(["checkout.session.completed","checkout.session.async_payment_succeeded"].includes(event.type)){
-    if(data.payment_status!=="paid")return respond({received:true});
-    const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE id=?").bind(data.client_reference_id||"").first();
+    if(data.payment_status!=="paid")return result(200,{received:true});
+    const order=await store.getOrder(data.client_reference_id||"");
     const plan=order?getPlan(order.plan):null;
-    if(!plan||order.session_id!==data.id)return respond({error:"unknown_subscription_order"},409);
-    if(order.status==="paid"&&order.subscription_state!=="pending")return respond({received:true,duplicate:true});
-    if(order.status!=="pending")return respond({error:"order_state_conflict"},409);
+    if(!plan||order.session_id!==data.id)return result(409,{error:"unknown_subscription_order"});
+    if(order.status==="paid"&&order.subscription_state!=="pending")return result(200,{received:true,duplicate:true});
+    if(order.status!=="pending")return result(409,{error:"order_state_conflict"});
     let session,items,subscription;
     try{
       session=await fromStripe(env,"checkout/sessions/"+encodeURIComponent(data.id),fetchImpl);
       items=await fromStripe(env,"checkout/sessions/"+encodeURIComponent(data.id)+"/line_items?limit=10",fetchImpl);
       subscription=await fromStripe(env,"subscriptions/"+encodeURIComponent(session.subscription||""),fetchImpl);
-    }catch{return respond({error:"provider_reconciliation_unavailable"},503)}
+    }catch{return result(503,{error:"provider_reconciliation_unavailable"})}
     if(!subscriptionMatches(session,order,plan,items,subscription)||
        data.subscription!==session.subscription||data.customer!==session.customer||
        data.amount_total!==session.amount_total||data.currency!==session.currency||
        data.metadata?.purchase_id!==session.metadata.purchase_id)
-       return respond({error:"subscription_reconciliation_mismatch"},409);
-    let written;
-    try{written=await env.ORDERS.prepare("UPDATE orders SET status='paid',subscription_state='active',subscription_id=?,stripe_customer_id=?,price_id=? WHERE id=? AND session_id=? AND status='pending' AND subscription_state='pending'")
-      .bind(subscription.id,session.customer,plan.price_id,order.id,session.id).run();}
-    catch{return respond({error:"subscription_persist_unavailable"},503)}
-    if(written.meta?.changes!==1)return respond({error:"subscription_state_conflict"},409);
-    return respond({received:true});
+       return result(409,{error:"subscription_reconciliation_mismatch"});
+    try{await store.putOrder({...order,status:"paid",subscription_state:"active",subscription_id:subscription.id,stripe_customer_id:session.customer,price_id:plan.price_id});}
+    catch{return result(503,{error:"subscription_persist_unavailable"})}
+    return result(200,{received:true});
   }
   const subscriptionId=event.type==="customer.subscription.deleted"?data.id:
     (typeof data.subscription==="string"?data.subscription:null);
-  if(typeof subscriptionId!=="string"||!subscriptionId.startsWith("sub_"))return respond({received:true});
-  const order=await env.ORDERS.prepare("SELECT * FROM orders WHERE subscription_id=?").bind(subscriptionId).first();
-  if(!order||!getPlan(order.plan))return respond({received:true});
+  if(typeof subscriptionId!=="string"||!subscriptionId.startsWith("sub_"))return result(200,{received:true});
+  const order=await store.findOrderBySubscription(subscriptionId);
+  if(!order||!getPlan(order.plan))return result(200,{received:true});
   if(event.type==="customer.subscription.deleted"||event.type==="invoice.payment_failed"){
     const next=event.type==="customer.subscription.deleted"?"canceled":"past_due";
     // A duplicate or out-of-order failure must not reactivate a subscription.
-    await env.ORDERS.prepare("UPDATE orders SET subscription_state=? WHERE id=? AND subscription_id=? AND subscription_state IN ('active','past_due')")
-      .bind(next,order.id,subscriptionId).run();
-    return respond({received:true});
+    if(["active","past_due"].includes(order.subscription_state))
+      await store.putOrder({...order,subscription_state:next});
+    return result(200,{received:true});
   }
   if(event.type==="invoice.paid"&&order.subscription_state==="past_due"){
-    if(data.paid!==true||data.amount_paid!==TEST_PLANS[order.plan].amount||data.currency!==TEST_PLANS[order.plan].currency)return respond({received:true});
+    if(data.paid!==true||data.amount_paid!==TEST_PLANS[order.plan].amount||data.currency!==TEST_PLANS[order.plan].currency)return result(200,{received:true});
     let subscription;
     try{subscription=await fromStripe(env,"subscriptions/"+encodeURIComponent(subscriptionId),fetchImpl)}
-    catch{return respond({error:"renewal_verification_unavailable"},503)}
+    catch{return result(503,{error:"renewal_verification_unavailable"})}
     const p=getPlan(order.plan),item=subscription.items?.data?.[0];
     if(subscription.livemode!==false||subscription.status!=="active"||subscription.customer!==order.stripe_customer_id||
-       item?.price?.id!==p.price_id||item.quantity!==1)return respond({error:"renewal_mismatch"},409);
-    await env.ORDERS.prepare("UPDATE orders SET subscription_state='active' WHERE id=? AND subscription_id=? AND subscription_state='past_due'")
-      .bind(order.id,subscriptionId).run();
+       item?.price?.id!==p.price_id||item.quantity!==1)return result(409,{error:"renewal_mismatch"});
+    await store.putOrder({...order,subscription_state:"active"});
   }
-  return respond({received:true});
+  return result(200,{received:true});
 }

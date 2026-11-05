@@ -1,0 +1,7 @@
+{
+  "name": "jusspay-auth",
+  "main": "src/auth-supabase.mjs",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false
+}

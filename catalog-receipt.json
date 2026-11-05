@@ -1,0 +1,16 @@
+{
+  "account": "acct_1U4xNyRs4gw4sfJH",
+  "livemode": true,
+  "status": "inactive_awaiting_offer_and_fulfillment",
+  "source": "Parent operator created and independently read these catalog IDs through the Stripe connector in this conversation; runtime not independently connected.",
+  "products": {
+    "promptos": "prod_VZSVPKfsqwNYrQ",
+    "chief": "prod_VZSVv3oRoIAd8k",
+    "thinktank": "prod_VZSV48t06PDhP6",
+    "sol": "prod_VZSVrCa3mDPDtl",
+    "fcr": "prod_VZSVoNjmYqE90K"
+  },
+  "prices": {},
+  "paymentLinks": {},
+  "chargesCreatedByThisImplementation": false
+}

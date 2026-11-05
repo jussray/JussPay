@@ -1,3 +1,8 @@
+-- SUPERSEDED REFERENCE — PR #1's D1 orders schema, preserved by the 2026-11-05 design
+-- merge for provenance only. It is NOT applied anywhere: order state now lives in the
+-- per-subject BillingAccount Durable Object (see docs/DESIGN-MERGE.md, storage decision).
+-- The invariants expressed here (row shape, status enums, one live membership per
+-- customer+plan) are enforced by src/subscriptions.mjs over Durable Object storage.
 -- Pre-authorized orders are created by a separate authenticated merchant service.
 CREATE TABLE IF NOT EXISTS orders (
  id TEXT PRIMARY KEY,

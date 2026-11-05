@@ -1,0 +1,10 @@
+{
+  "name": "jusspay",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {"bindings": [{"name": "BILLING", "class_name": "BillingAccount"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["BillingAccount"]}],
+  "vars": {"STRIPE_LIVE": "false", "APPROVED_PLANS": "{}"}
+}
