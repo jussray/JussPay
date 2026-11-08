@@ -104,7 +104,7 @@ export async function orderStatus(store,purchaseId){
 // `customerId` is the subject's JussPay-managed Stripe customer when one exists, so webhook
 // delivery routes back to the same BillingAccount via customer metadata; the session and
 // subscription metadata always carry jusspay_subject + purchase_id as a second route.
-export async function checkoutTestSubscription(store,env,fetchImpl,subject,input,customerId){
+export async function checkoutTestSubscription(store,env,fetchImpl,subject,input,ensureCustomer){
   const plan=getPlan(input?.plan);
   if(!plan||!/^[A-Za-z0-9_-]{8,100}$/.test(input?.purchase_id||""))return result(400,{error:"invalid_plan_or_order"});
   const order=await store.getOrder(input.purchase_id);
@@ -125,7 +125,14 @@ export async function checkoutTestSubscription(store,env,fetchImpl,subject,input
     success_url:plan.origin+"/checkout?test_payment=return",
     cancel_url:plan.origin+"/checkout?test_payment=canceled"
   });
-  if(customerId)params.set("customer",customerId);
+  // Customer ownership must be established before Checkout; Stripe-created
+  // customers do not automatically inherit the session's routing metadata.
+  let customerId;
+  try{customerId=await ensureCustomer();}
+  catch{return result(503,{error:"customer_binding_unavailable"})}
+  if(typeof customerId!=="string"||!/^cus_[a-zA-Z0-9_]+$/.test(customerId))
+    return result(503,{error:"customer_binding_unavailable"});
+  params.set("customer",customerId);
   let response,session;
   try{
     response=await fetchImpl("https://api.stripe.com/v1/checkout/sessions",{
