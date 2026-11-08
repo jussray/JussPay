@@ -101,9 +101,10 @@ export async function orderStatus(store,purchaseId){
 }
 
 // POST /subscriptions/checkout — open a Stripe test subscription Checkout for a pending order.
-// `customerId` is the subject's JussPay-managed Stripe customer when one exists, so webhook
-// delivery routes back to the same BillingAccount via customer metadata; the session and
-// subscription metadata always carry jusspay_subject + purchase_id as a second route.
+// `ensureCustomer` is a server-owned callback invoked only after the pending order
+// and approved Stripe price have been verified. It creates or validates the
+// subject-bound test Customer so invoices can route to the same BillingAccount.
+// Session/subscription metadata provide a secondary route for supported events.
 export async function checkoutTestSubscription(store,env,fetchImpl,subject,input,ensureCustomer){
   const plan=getPlan(input?.plan);
   if(!plan||!/^[A-Za-z0-9_-]{8,100}$/.test(input?.purchase_id||""))return result(400,{error:"invalid_plan_or_order"});
