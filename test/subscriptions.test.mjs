@@ -87,6 +87,33 @@ test('sandbox subscription checkout fails closed without gate, sandbox key or au
   assert.equal((await worker.fetch(statusRequest(),wrong)).status,404);
 });
 
+test('first sandbox subscription checkout binds the customer to the authenticated subject before opening Checkout',async()=>{
+  const h=await subsEnv('two'),e=h.env,p=TEST_PLANS.two,mock=mockStripe(p);
+  const original=e.STRIPE_FETCH;
+  let customerCreates=0;
+  e.STRIPE_FETCH=async(url,options={})=>{
+    if(String(url).endsWith('/v1/customers')&&options.method==='POST'){
+      const form=new URLSearchParams(options.body.toString());
+      assert.equal(form.get('metadata[jusspay_subject]'),'customer_1');
+      customerCreates++;
+      return Response.json({id:'cus_test_123',livemode:false,metadata:{jusspay_subject:'customer_1'}});
+    }
+    return original(url,options);
+  };
+  await withFetch(async(url,options={})=>{
+    if(String(url).endsWith('/checkout/sessions')&&options.method==='POST'){
+      const form=new URLSearchParams(options.body.toString());
+      assert.equal(form.get('customer'),'cus_test_123');
+    }
+    return mock.fetch(url,options);
+  },async()=>{
+    const response=await worker.fetch(request('/subscriptions/checkout'),e);
+    assert.equal(response.status,200);
+  });
+  assert.equal(customerCreates,1);
+  assert.equal(await h.state.storage.get('customer'),'cus_test_123');
+});
+
 test('Model One and Two approved price creates only an authenticated test subscription checkout',async()=>{
   for(const name of ['one','two']){
     const h=await subsEnv(name),e=h.env,p=TEST_PLANS[name],mock=mockStripe(p);
