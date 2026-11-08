@@ -114,6 +114,24 @@ test('first sandbox subscription checkout binds the customer to the authenticate
   assert.equal(await h.state.storage.get('customer'),'cus_test_123');
 });
 
+test('foreign Stripe customer cannot be reused for another subject sandbox checkout',async()=>{
+  const h=await subsEnv('two'),e=h.env,p=TEST_PLANS.two,mock=mockStripe(p);
+  await h.state.storage.put('customer','cus_foreign');
+  const original=e.STRIPE_FETCH;
+  e.STRIPE_FETCH=async(url,options)=>{
+    if(String(url).endsWith('/v1/customers/cus_foreign'))
+      return Response.json({id:'cus_foreign',livemode:false,metadata:{jusspay_subject:'another_subject'}});
+    return original(url,options);
+  };
+  await withFetch(mock.fetch,async()=>{
+    const response=await worker.fetch(request('/subscriptions/checkout'),e);
+    assert.equal(response.status,503);
+    assert.equal((await response.json()).error,'customer_binding_unavailable');
+  });
+  assert.equal(mock.seen.some(url=>url.endsWith('/checkout/sessions')),false);
+  assert.equal(await h.state.storage.get('customer'),'cus_foreign');
+});
+
 test('Model One and Two approved price creates only an authenticated test subscription checkout',async()=>{
   for(const name of ['one','two']){
     const h=await subsEnv(name),e=h.env,p=TEST_PLANS[name],mock=mockStripe(p);
