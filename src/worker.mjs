@@ -210,6 +210,25 @@ export class BillingAccount {
     if(r && event.type.startsWith('checkout.session.') && r.status===200 && typeof o.customer==='string' && !await this.state.storage.get('customer'))await this.state.storage.put('customer',o.customer);
     return r?json(r.body,r.status):null;
   }
+  /** Ensure sandbox invoices route to the authenticated subject, even on first checkout. */
+  async ensureTestCustomer(subject){
+    if(this.env.STRIPE_LIVE!=='false')fail(503,'test_mode_required');
+    await account(this.env);
+    const stored=await this.state.storage.get('customer');
+    if(stored){
+      const existing=await stripe(this.env,`customers/${encodeURIComponent(stored)}`);
+      if(existing.id!==stored||existing.livemode!==false||existing.metadata?.jusspay_subject!==subject)
+        fail(503,'customer_binding_mismatch');
+      return stored;
+    }
+    const created=await stripe(this.env,'customers','POST',
+      {'metadata[jusspay_subject]':subject},`customer-${await digest(subject)}`);
+    if(typeof created.id!=='string'||!/^cus_[a-zA-Z0-9_]+$/.test(created.id)||
+       created.livemode!==false||created.metadata?.jusspay_subject!==subject)
+      fail(503,'customer_binding_mismatch');
+    await this.state.storage.put('customer',created.id);
+    return created.id;
+  }
   async orderRoute(path,input){
     const env=this.env,store=this.orderStore(),fetchImpl=env.STRIPE_FETCH||fetch;
     const gated=()=>env.SUBSCRIPTIONS_TEST_ENABLED!=='true'?json({error:'subscriptions_not_enabled'},503):!testKey(env)?json({error:'test_key_required'},503):null;
@@ -218,7 +237,7 @@ export class BillingAccount {
     if(path==='/subscriptions/orders'||path==='/subscriptions/checkout'){
       const gate=gated();if(gate)return gate;
       const parsed=parseRaw();if(parsed.error)return parsed.error;
-      r=path==='/subscriptions/orders'?await createTestOrder(store,input.subject,parsed.value):await checkoutTestSubscription(store,env,fetchImpl,input.subject,parsed.value,await this.state.storage.get('customer'));
+      r=path==='/subscriptions/orders'?await createTestOrder(store,input.subject,parsed.value):await checkoutTestSubscription(store,env,fetchImpl,input.subject,parsed.value,()=>this.ensureTestCustomer(input.subject));
     }else if(path==='/subscriptions/entitlement'||path==='/subscriptions/status'){
       const gate=gated();if(gate)return gate;
       r=path==='/subscriptions/entitlement'?await planEntitlement(store,input.query?.plan):await orderStatus(store,input.query?.purchase_id);
