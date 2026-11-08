@@ -41,6 +41,12 @@ export function combinedEnv({subject='customer_1'}={}){
     STRIPE_FETCH:async(url,init)=>{
       const u=String(url);
       if(u.endsWith('/v1/account'))return Response.json({id:'acct_1U4xNyRs4gw4sfJH',charges_enabled:true,details_submitted:true});
+      if(u.endsWith('/v1/customers')&&init?.method==='POST'){
+        const body=new URLSearchParams(init.body.toString());
+        if(body.get('metadata[jusspay_subject]')!==subject)
+          return Response.json({error:'customer_subject_mismatch'},{status:403});
+        return Response.json({id:'cus_test_123',livemode:false,metadata:{jusspay_subject:subject}});
+      }
       if(u.includes('/v1/customers/'))return Response.json({id:decodeURIComponent(u.split('/v1/customers/')[1]),livemode:false,metadata:{jusspay_subject:subject}});
       return fetch(url,init);
     }
