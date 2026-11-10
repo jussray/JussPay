@@ -18,7 +18,7 @@ const signature = (payload, secret, t = Math.floor(Date.now()/1000)) => {
   const v = createHmac('sha256', secret).update(`${t}.${payload}`).digest('hex');
   return `t=${t},v1=${v}`;
 };
-const env = () => ({ DB: new D1Mock(), STRIPE_SECRET_KEY: 'sk_test_FAKE', STRIPE_WEBHOOK_SECRET: 'whsec_fake', STRIPE_PRICE_ID: 'price_test_fake', STRIPE_EXPECTED_AMOUNT_MINOR: '300', STRIPE_EXPECTED_CURRENCY:'usd', PUBLIC_BASE_URL:'https://paid.example.com', CREDITS_PER_PURCHASE: '3', CHECKOUT_ENABLED: 'true', PREMIUM_ENABLED: 'true' });
+const env = () => ({ DB: new D1Mock(), STRIPE_SECRET_KEY: 'sk_test_FAKE', STRIPE_WEBHOOK_SECRET: 'whsec_fake', STRIPE_PRICE_ID: 'price_test_fake', STRIPE_EXPECTED_AMOUNT_MINOR: '300', STRIPE_EXPECTED_CURRENCY:'usd', PUBLIC_BASE_URL:'https://paid.example.com', CREDITS_PER_PURCHASE: '3', CHECKOUT_ENABLED: 'true', PREMIUM_ENABLED: 'true', CHECKOUT_RATE_LIMITER: { limit: async () => ({ success: true }) } });
 
 async function webhook(event, e) {
   const body = JSON.stringify({livemode: false, ...event});
@@ -80,6 +80,8 @@ test('unsigned and mismatched checkout events cannot create credits',async()=>{
   const mismatched={id:'evt_unknown',type:'checkout.session.completed',data:{object:{id:'cs_test_forge',mode:'payment',payment_status:'paid',payment_intent:'pi_unknown',metadata:{purpose:'jussco_api_credits',token_hash:'a'.repeat(64)}}}};
   assert.equal((await webhook(mismatched,e)).status,200);
   assert.equal(e.DB.db.prepare('SELECT COUNT(*) AS n FROM access_tokens').get().n,0);
+  // Invariant 4: a mismatch leaves a non-sensitive receipt (event id only, not applied).
+  assert.equal(e.DB.db.prepare("SELECT applied FROM webhook_events WHERE event_id = 'evt_unknown'").get()?.applied, 0);
 });
 test('unknown paths and public health are isolated',async()=>{
   const e=env();
@@ -103,4 +105,48 @@ test('refund-before-completion is remembered and prevents granting credits', asy
   const result=await (await worker.fetch(new Request('https://paid.example.com/api/credits',{headers:{Authorization:'Bearer '+key}}),e)).json();
   assert.equal(result.status,'pending');
   assert.equal(result.remaining,0);
+});
+
+const validPriceResponse = () => new Response(JSON.stringify({id:'price_test_fake',active:true,livemode:false,type:'one_time',recurring:null,unit_amount:300,currency:'usd'}),{status:200});
+
+test('a signed paid event whose Stripe line item is a different price fails closed with a receipt', async()=>{
+  const e=env(), key=generateApiKey(), hash=await sha256(key);
+  e.DB.db.prepare('INSERT INTO access_tokens(token_hash, checkout_session_id, status, remaining, created_at, updated_at) VALUES(?, ?, ?, 0, 1, 1)').run(hash,'cs_test_wrongprice','pending');
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url)=>{
+    assert.equal(url,'https://api.stripe.com/v1/checkout/sessions/cs_test_wrongprice/line_items?limit=10');
+    return new Response(JSON.stringify({has_more:false,data:[{price:{id:'price_other',type:'one_time'},quantity:1,amount_total:300,currency:'usd'}]}),{status:200});
+  };
+  try {
+    const res=await webhook({id:'evt_wrong_price',type:'checkout.session.completed',data:{object:{id:'cs_test_wrongprice',mode:'payment',payment_status:'paid',amount_total:300,currency:'usd',payment_intent:'pi_wrong',metadata:{purpose:'jussco_api_credits',token_hash:hash}}}},e);
+    assert.equal(res.status,200);
+    const result=await (await worker.fetch(new Request('https://paid.example.com/api/credits',{headers:{Authorization:'Bearer '+key}}),e)).json();
+    assert.equal(result.status,'pending');
+    assert.equal(result.remaining,0);
+    assert.equal(e.DB.db.prepare("SELECT applied FROM webhook_events WHERE event_id = 'evt_wrong_price'").get()?.applied,0);
+  } finally { globalThis.fetch=originalFetch; }
+});
+
+test('checkout is rate limited by client IP before any Stripe call or key issuance', async()=>{
+  const e=env(), calls=[];
+  e.CHECKOUT_RATE_LIMITER={ limit: async ({key}) => { assert.equal(key,'203.0.113.7'); return {success:false}; } };
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url)=>{ calls.push(url); if (url === 'https://api.stripe.com/v1/prices/price_test_fake') return validPriceResponse(); throw new Error('unexpected Stripe call'); };
+  try {
+    const res=await worker.fetch(new Request('https://paid.example.com/api/checkout',{method:'POST',headers:{'cf-connecting-ip':'203.0.113.7'}}),e);
+    assert.equal(res.status,429);
+    assert.deepEqual(calls,[]);
+    assert.equal(e.DB.db.prepare('SELECT COUNT(*) AS n FROM access_tokens').get().n,0);
+  } finally { globalThis.fetch=originalFetch; }
+});
+
+test('checkout fails closed when the rate limiter binding is missing', async()=>{
+  const e=env(); delete e.CHECKOUT_RATE_LIMITER;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url)=>{ if (url === 'https://api.stripe.com/v1/prices/price_test_fake') return validPriceResponse(); throw new Error('unexpected Stripe call'); };
+  try {
+    const res=await worker.fetch(new Request('https://paid.example.com/api/checkout',{method:'POST'}),e);
+    assert.equal(res.status,503);
+    assert.equal(e.DB.db.prepare('SELECT COUNT(*) AS n FROM access_tokens').get().n,0);
+  } finally { globalThis.fetch=originalFetch; }
 });

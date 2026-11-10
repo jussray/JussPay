@@ -77,10 +77,15 @@ async function stripeCheckout(request, env) {
   let purchase;
   try { purchase = approvedPurchase(env); }
   catch { return json({ error: 'Approved price is not configured' }, 503); }
+  // Public endpoint: fail closed without a keyed limiter, and limit BEFORE any Stripe call or D1 write.
+  const limiter = env.CHECKOUT_RATE_LIMITER;
+  if (!limiter || typeof limiter.limit !== 'function') return json({ error: 'Checkout rate limiter not configured' }, 503);
+  const { success: withinLimit } = await limiter.limit({ key: request.headers.get('cf-connecting-ip') || 'unknown' });
+  if (!withinLimit) return json({ error: 'Too many checkout attempts. Please retry later.' }, 429);
   try {
     if (!(await checkStripePrice(env, purchase))) return json({ error: 'Approved Stripe Price mismatch' }, 503);
   } catch { return json({ error: 'Stripe Price verification unavailable' }, 503); }
-  // This endpoint is public by design. Add Cloudflare WAF/rate limiting before publishing.
+  // WAF rules are still a separate release item; the keyed limiter above is the in-Worker guard.
   if (request.headers.get('content-length') && Number(request.headers.get('content-length')) > 64) return json({ error: 'Unexpected request body' }, 413);
   const apiKey = generateApiKey();
   const tokenHash = await sha256(apiKey);
@@ -134,6 +139,13 @@ async function verifyStripeSignature(raw, signatureHeader, secret, now = Math.fl
   });
 }
 
+// Invariant 4: a mismatched paid event fails closed and leaves a non-sensitive receipt.
+// Stores only the Stripe event id with applied = 0: no amounts, tokens, or payment data.
+async function recordMismatchReceipt(env, eventId, now) {
+  await env.DB.prepare('INSERT OR IGNORE INTO webhook_events(event_id, applied, created_at) VALUES(?, 0, ?)')
+    .bind(eventId, now).run();
+}
+
 async function stripeWebhook(request, env) {
   if (!env.STRIPE_WEBHOOK_SECRET) return json({ error: 'Webhook not configured' }, 503);
   const raw = await request.text();
@@ -157,7 +169,10 @@ async function stripeWebhook(request, env) {
     let purchase;
     try { purchase = approvedPurchase(env); } catch { return json({ error: 'Approved price configuration missing' }, 503); }
     // Reject zero-dollar, alternate-currency, or modified-amount purchases before reading Stripe.
-    if (obj.amount_total !== purchase.amount || obj.currency !== purchase.currency) return json({ received: true });
+    if (obj.amount_total !== purchase.amount || obj.currency !== purchase.currency) {
+      await recordMismatchReceipt(env, event.id, now);
+      return json({ received: true });
+    }
     // Unknown, already redeemed, and revoked sessions may not trigger external verification calls.
     const pending = await env.DB.prepare(`SELECT status FROM access_tokens WHERE token_hash = ? AND checkout_session_id = ?`)
       .bind(tokenHash, obj.id).first();
@@ -168,7 +183,10 @@ async function stripeWebhook(request, env) {
     let matched;
     try { matched = await checkStripeLineItem(obj.id, env, purchase); }
     catch { return json({ error: 'Payment verification temporarily unavailable' }, 503); }
-    if (!matched) return json({ received: true });
+    if (!matched) {
+      await recordMismatchReceipt(env, event.id, now);
+      return json({ received: true });
+    }
     // Batch guarantees atomicity. Only pending tokens become active; replay does not double-grant.
     await env.DB.batch([
       env.DB.prepare('INSERT OR IGNORE INTO webhook_events(event_id, applied, created_at) VALUES(?, 0, ?)').bind(event.id, now),

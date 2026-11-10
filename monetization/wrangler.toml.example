@@ -16,6 +16,15 @@ CREDITS_PER_PURCHASE = "100"
 CHECKOUT_ENABLED = "false"
 PREMIUM_ENABLED = "false"
 
+# Keyed rate limiter for POST /api/checkout. Checkout returns 503 until this binding exists.
+# Left commented on purpose: enable only after release approval, with a unique namespace_id.
+# [[ratelimits]]
+# name = "CHECKOUT_RATE_LIMITER"
+# namespace_id = "REPLACE_WITH_UNIQUE_INTEGER"
+# [ratelimits.simple]
+# limit = 5
+# period = 60
+
 [[d1_databases]]
 binding = "DB"
 database_name = "jussco_paid_api"
