@@ -11,8 +11,8 @@ export function stripeConfiguration(env){
   return config;
 }
 const EVENTS = new Set(['checkout.session.completed','checkout.session.async_payment_succeeded','customer.subscription.created','customer.subscription.updated','customer.subscription.deleted','invoice.paid','invoice.payment_failed','charge.refunded','charge.dispute.created']);
-const json = (value,status=200) => new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff','x-robots-tag':'noindex'}});
-const fail = (status,code) => { throw Object.assign(new Error(code),{status}); };
+export const json = (value,status=200) => new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff','x-robots-tag':'noindex'}});
+export const fail = (status,code) => { throw Object.assign(new Error(code),{status}); };
 const enc = new TextEncoder();
 export async function digest(value){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 export async function verifySignature(raw,header,secret,now=Math.floor(Date.now()/1000)){
@@ -57,7 +57,7 @@ async function identity(request,env){
   if(typeof u.subject!=='string'||!u.subject.length||u.subject.length>200||u.audience!=='jusspay'||!Number.isFinite(u.expiresAt)||u.expiresAt<=Date.now()/1000) fail(401,'invalid_identity');
   return u.subject;
 }
-async function boundedText(request,limit){
+export async function boundedText(request,limit){
   if(Number(request.headers.get('content-length')||0)>limit)fail(413,'payload_too_large');
   const reader=request.body?.getReader();if(!reader)return '';
   const chunks=[];let size=0;

@@ -17,7 +17,8 @@ const CATALOG={
 
 function jbhEnv(overrides={}){
   const calls=[];
-  const sessions=new Map();
+  const sessions=new Map(),byKey=new Map(),intents=new Map();
+  const charge={id:'ch_1',payment_intent:'pi_test_1',refunded:true};
   const env={
     JBH_ORDERS_ENABLED:'true',JBH_STRIPE_LIVE:'false',JBH_STRIPE_SECRET_KEY:'sk_test_FAKE',JBH_STRIPE_WEBHOOK_SECRET:WEBHOOK_SECRET,
     JBH_STRIPE_API_VERSION:'test-only',JBH_TEST_ACCOUNT_ID:'acct_1TestJbhSandbox',JBH_STOREFRONT_KEY:STOREFRONT_KEY,JBH_OWNER_KEY:OWNER_KEY,
@@ -27,24 +28,27 @@ function jbhEnv(overrides={}){
       const u=String(url).replace('https://api.stripe.com/v1/','');calls.push({path:u,method:init.method||'GET',headers:init.headers,body:init.body?Object.fromEntries(init.body):null});
       if(u==='account')return Response.json({id:env.__accountId||'acct_1TestJbhSandbox',charges_enabled:true,details_submitted:true});
       if(u==='checkout/sessions'&&init.method==='POST'){
-        const b=Object.fromEntries(init.body);const id=`cs_test_${sessions.size+1}`;
+        const k=init.headers['Idempotency-Key'];if(byKey.has(k))return Response.json(sessions.get(byKey.get(k)));
+        const b=Object.fromEntries(init.body);const id=`cs_test_${sessions.size+1}`;byKey.set(k,id);
+        intents.set(`pi_test_${sessions.size+1}`,{id:`pi_test_${sessions.size+1}`,livemode:false,metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
         let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++)subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(b[`line_items[${i}][price_data][unit_amount]`]);
         const shipping=Number(b['shipping_options[0][shipping_rate_data][fixed_amount][amount]']);
         sessions.set(id,{id,object:'checkout.session',mode:'payment',livemode:false,currency:'usd',client_reference_id:b.client_reference_id,metadata:{jbh_order_id:b['metadata[jbh_order_id]']},amount_subtotal:subtotal,amount_total:subtotal+shipping,total_details:{amount_shipping:shipping},payment_status:'unpaid',status:'open',url:`https://checkout.stripe.com/c/pay/${id}`});
         return Response.json(sessions.get(id));
       }
       if(u.startsWith('checkout/sessions/'))return Response.json(sessions.get(decodeURIComponent(u.split('/')[2])));
-      if(u.startsWith('charges/'))return Response.json({id:'ch_1',payment_intent:'pi_test_1'});
+      if(u.startsWith('charges/'))return Response.json(charge);
+      if(u.startsWith('payment_intents/'))return intents.has(u.split('/')[1])?Response.json(intents.get(u.split('/')[1])):new Response('{}',{status:404});
       return new Response('{}',{status:404});
     },
     ...overrides
   };
   const book=new JbhOrderBook({storage:memoryStorage()},env);
   env.JBH_ORDERS={idFromName:n=>n,get:()=>book};
-  return {env,calls,sessions,book};
+  return {env,calls,sessions,book,charge};
 }
 
-const post=(path,body,headers={})=>new Request('https://pay.example'+path,{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)});
+const post=(path,body,headers={})=>new Request('https://pay.example'+path,{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(path==='/jbh/checkout'&&body&&!('requestId' in body)?{...body,requestId:crypto.randomUUID()}:body)});
 const get=(path,headers={})=>new Request('https://pay.example'+path,{headers});
 const sf={'x-jbh-storefront-key':STOREFRONT_KEY};
 
@@ -61,7 +65,7 @@ async function paidOrder(h,items=[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1},{sku:'
   assert.equal(r.status,200);
   const {orderId}=await r.json();
   const sessionId=[...h.sessions.keys()].at(-1);
-  Object.assign(h.sessions.get(sessionId),{payment_status:'paid',status:'complete',payment_intent:'pi_test_1',
+  Object.assign(h.sessions.get(sessionId),{payment_status:'paid',status:'complete',payment_intent:`pi_test_${sessionId.split('_').pop()}`,
     collected_information:{shipping_details:{name:'Test Buyer',address:{line1:'1 Test St',city:'Testville',state:'MD',postal_code:'21201',country:'US'}}},
     customer_details:{email:'buyer@example.test',phone:'+15555550100'}});
   return {orderId,sessionId};
@@ -218,4 +222,90 @@ test('the hair lane leaves the subscription core untouched',async()=>{
   const r=await worker.fetch(new Request('https://pay.example/checkout',{method:'POST',body:'{}'}),h.env);
   assert.equal((await r.json()).error,'payments_disabled');
   assert.equal(h.calls.length,0);
+});
+
+// --- Review fixes (PR #8): retries, event order, partial refunds, dispatch, bounds.
+const refunded=(id,chargeId='ch_1')=>({id,livemode:false,type:'charge.refunded',data:{object:{id:chargeId}}});
+const disputed=(id,chargeId='ch_1')=>({id,livemode:false,type:'charge.dispute.created',data:{object:{id:'dp_1',charge:chargeId}}});
+const orderStatus=async(h,id)=>(await (await worker.fetch(get(`/jbh/orders/${id}`,sf),h.env)).json()).status;
+const queue=async h=>(await (await worker.fetch(get('/jbh/fulfillment',{'x-jbh-owner-key':OWNER_KEY}),h.env)).json()).queue;
+
+test('a storefront retry with the same requestId reuses the order and the Stripe session',async()=>{
+  const h=jbhEnv();const requestId=crypto.randomUUID();const body={requestId,items:[{sku:'JBH-BS-14',quantity:1}]};
+  const a=await (await worker.fetch(post('/jbh/checkout',body,sf),h.env)).json();
+  const b=await (await worker.fetch(post('/jbh/checkout',body,sf),h.env)).json();
+  assert.equal(a.orderId,b.orderId);assert.equal(a.url,b.url);assert.equal(h.sessions.size,1);
+  const reused=await worker.fetch(post('/jbh/checkout',{requestId,items:[{sku:'JBH-BS-14',quantity:2}]},sf),h.env);
+  assert.equal(reused.status,409);assert.equal((await reused.json()).error,'request_id_reused');
+  const missing=await worker.fetch(post('/jbh/checkout',{requestId:'nope',items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+  assert.equal((await missing.json()).error,'request_id_required');
+});
+
+test('a retry after a lost Stripe response replays the same idempotency key, never a second session',async()=>{
+  const h=jbhEnv();const requestId=crypto.randomUUID();const body={requestId,items:[{sku:'JBH-BS-14',quantity:1}]};
+  const real=h.env.STRIPE_FETCH;let drop=true;
+  h.env.STRIPE_FETCH=async(url,init)=>{const r=await real(url,init);if(drop&&String(url).endsWith('/checkout/sessions')){drop=false;return new Response('{}',{status:502});}return r;};
+  assert.equal((await worker.fetch(post('/jbh/checkout',body,sf),h.env)).status,502);
+  const ok=await (await worker.fetch(post('/jbh/checkout',body,sf),h.env)).json();
+  assert.match(ok.url,/cs_test_1$/);assert.equal(h.sessions.size,1);
+  const keys=h.calls.filter(c=>c.path==='checkout/sessions').map(c=>c.headers['Idempotency-Key']);
+  assert.equal(keys.length,2);assert.equal(keys[0],keys[1]);
+});
+
+test('a refund that arrives before the paid event is never lost and blocks dispatch',async()=>{
+  const h=jbhEnv();const {orderId,sessionId}=await paidOrder(h);
+  const r=await worker.fetch(await signed(refunded('evt_early')),h.env);
+  assert.deepEqual(await r.json(),{received:true});
+  assert.equal(await orderStatus(h,orderId),'refunded');
+  await worker.fetch(await signed(completed('evt_late_paid',sessionId)),h.env);
+  assert.equal(await orderStatus(h,orderId),'refunded');
+  assert.equal((await queue(h)).length,0,'a refunded order must never reach the dispatch queue');
+});
+
+test('a dispute on an order whose paid step needed reconciliation is still recorded',async()=>{
+  const h=jbhEnv();const {orderId,sessionId}=await paidOrder(h);
+  h.sessions.get(sessionId).amount_total=1;
+  await worker.fetch(await signed(completed('evt_mis',sessionId)),h.env);
+  assert.equal(await orderStatus(h,orderId),'pending');
+  await worker.fetch(await signed(disputed('evt_dsp')),h.env);
+  assert.equal(await orderStatus(h,orderId),'disputed');
+});
+
+test('a partial refund is recorded as partial, and a dispute is never hidden by a refund',async()=>{
+  const h=jbhEnv();const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed(completed('evt_ok',sessionId)),h.env);
+  h.charge.refunded=false;
+  await worker.fetch(await signed(refunded('evt_part')),h.env);
+  assert.equal(await orderStatus(h,orderId),'partially_refunded');
+  assert.equal((await queue(h))[0].status,'hold');
+  await worker.fetch(await signed(disputed('evt_dsp2')),h.env);
+  h.charge.refunded=true;
+  await worker.fetch(await signed(refunded('evt_full')),h.env);
+  assert.equal(await orderStatus(h,orderId),'disputed');
+});
+
+test('the owner marks an order dispatched, which removes it from the queue exactly once',async()=>{
+  const h=jbhEnv();const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed(completed('evt_q',sessionId)),h.env);
+  const path=`/jbh/fulfillment/${orderId}/dispatched`;
+  assert.equal((await worker.fetch(post(path,{note:'DSB order 123'}),h.env)).status,401);
+  const r=await worker.fetch(post(path,{note:'DSB order 123'},{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.deepEqual(await r.json(),{id:orderId,status:'dispatched'});
+  assert.equal((await queue(h)).length,0);
+  assert.equal((await worker.fetch(post(path,{},{'x-jbh-owner-key':OWNER_KEY}),h.env)).status,409);
+  await worker.fetch(await signed(refunded('evt_after')),h.env);
+  assert.equal(await orderStatus(h,orderId),'refunded');
+  assert.equal((await h.book.state.storage.list({prefix:`receipt:${orderId}:`})).size,1,'a refund after dispatch leaves an owner receipt');
+});
+
+test('an unknown shipping choice is rejected, not silently charged as standard',async()=>{
+  const env=jbhEnv().env;
+  for(const shipping of ['Express','overnight',1,null])assert.throws(()=>priceOrder(env,{items:[{sku:'JBH-BS-14',quantity:1}],shipping}),{message:'invalid_shipping'});
+});
+
+test('an oversized webhook body without Content-Length is refused before buffering it whole',async()=>{
+  const h=jbhEnv();
+  const big=new ReadableStream({start(c){for(let i=0;i<70;i++)c.enqueue(new TextEncoder().encode('x'.repeat(4096)));c.close();}});
+  const r=await worker.fetch(new Request('https://pay.example/jbh/webhook',{method:'POST',body:big,duplex:'half',headers:{'stripe-signature':'t=1,v1='+'0'.repeat(64)}}),h.env);
+  assert.equal(r.status,413);
 });
