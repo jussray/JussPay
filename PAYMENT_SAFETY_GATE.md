@@ -13,6 +13,7 @@ This document is a review and implementation gate, not evidence that JussPay pro
 ## Authority and separation
 - Authoritative source: `jussray/JussPay`. Keep the parent `jussray/jussray` website independent.
 - Keep existing Shopify storefronts and their checkout, merchant accounts, and product catalogs unchanged.
+- **Founder ruling 2026-11-17:** JussPay also hosts a separate JBH hair-and-beauty order lane (`src/jbh-orders.mjs`) sold by the **Juss Ray Beauty Co** Stripe account (`acct_1TfbELRp7J40bCrl`), never by the Juss&Co account. It has its own secrets, webhook secret, account binding and Durable Object (`JbhOrderBook`), is OFF by default (`JBH_ORDERS_ENABLED`), and is sandbox-only in this version. It does not change the Shopify store, its checkout or its catalog.
 - Do not infer that a central reporting dashboard authorizes fund pooling, payout routing, or a shared merchant of record.
 - Founder Control Room may receive minimized, redacted verification receipts, not payment secrets or raw customer information.
 - Marketplace/Stripe Connect, subscriptions, and Cloudflare x402/Pay Per Crawl are future, separately gated integrations.

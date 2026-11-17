@@ -1,5 +1,6 @@
 import {createTestOrder,planEntitlement,orderStatus,checkoutTestSubscription,checkoutOneTimeOrder,orderWebhook,validatePurchase,testKey} from './subscriptions.mjs';
-export {validatePurchase};
+import {handleJbh,JbhOrderBook} from './jbh-orders.mjs';
+export {validatePurchase,JbhOrderBook};
 const ACCOUNT = 'acct_1U4xNyRs4gw4sfJH';
 export const PRODUCTS = Object.freeze({promptos:'PromptOS',chief:'Chief',thinktank:'Think Tank',sol:'SolContinuity',fcr:'Founder Control Room'});
 export const PRODUCT_IDS=Object.freeze({promptos:'prod_VZSVPKfsqwNYrQ',chief:'prod_VZSVv3oRoIAd8k',thinktank:'prod_VZSV48t06PDhP6',sol:'prod_VZSVrCa3mDPDtl',fcr:'prod_VZSVoNjmYqE90K'});
@@ -74,6 +75,8 @@ export default {async fetch(request,env){try{
   if(url.pathname==='/catalog' && request.method==='GET'){
     const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({id,name,purchaseStatus:operational&&catalog[id]?'requires_provider_validation':'unavailable',providerAvailabilityVerified:false,offerConfigured:Boolean(catalog[id]),...(catalog[id]?{unitAmount:catalog[id].unitAmount,currency:catalog[id].currency,interval:catalog[id].interval,termsUrl:catalog[id].termsUrl,entitlements:catalog[id].entitlements}:{})})));
   }
+  // JBH hair orders: own gate, keys, account and Durable Object (src/jbh-orders.mjs).
+  if(url.pathname.startsWith('/jbh/'))return await handleJbh(request,env);
   const ORDER_PATHS=['/subscriptions/orders','/subscriptions/checkout','/subscriptions/status','/subscriptions/entitlement','/orders/checkout'];
   if((ORDER_PATHS.includes(url.pathname)||url.pathname==='/checkout') && env.PAYMENTS_ENABLED!=='true')return json({error:'payments_disabled'},503);
   ready(env,url.pathname==='/webhook');

@@ -15,6 +15,20 @@ Cloudflare Worker billing foundation for Juss&Co. **Not live or activated.** The
 
 No ambient-cookie authentication or browser CORS is provided. Product servers call JussPay using a visitor-scoped Bearer token. `AUTH` must be a **private service binding** implementing `POST https://auth.internal/verify`, validating that token against the actual app/session identity, and returning `{ "subject": "stable-global-user-id", "audience": "jusspay", "expiresAt": 1234567890 }`. The subject must be globally unique across all five apps. Tokens must expire and the auth service must deny inappropriate issuers, audiences, revoked sessions and tenants. Never forward an unverified `x-user-id` header or founder credentials.
 
+## JBH hair-order lane (sandbox only)
+
+Separate from the five-app subscription core (founder ruling 2026-11-17). Physical hair and beauty orders for jussbeautifulhair.com, sold by the **Juss Ray Beauty Co** Stripe account (`acct_1TfbELRp7J40bCrl`). Code: `src/jbh-orders.mjs`; tests: `test/jbh-orders.test.mjs`.
+
+- `POST /jbh/checkout` (storefront server only, header `x-jbh-storefront-key`): `{ "items": [{ "sku", "quantity" }], "shipping": "standard" | "express" }`. Prices, shipping and totals come only from `JBH_CATALOG` and `JBH_SHIPPING`; client amounts are ignored. Creates an order, then one hosted Checkout Session (US shipping address and phone collected), idempotent on the order id.
+- `GET /jbh/orders/:id` (storefront key): status and totals only, no shipping address, email or phone.
+- `POST /jbh/webhook` (own secret `JBH_STRIPE_WEBHOOK_SECRET`): verifies the raw-body signature, rejects live events, then re-reads the session from Stripe and requires id, order id, mode, currency, subtotal, shipping and total to match before marking the order paid. Mismatches write a receipt and change nothing. A paid order is written once to the owner's fulfillment queue, grouped by vendor, as `awaiting_owner_dispatch`. Refunds and disputes set the order to `refunded`/`disputed` and hold dispatch; later events cannot undo that.
+- `GET /jbh/fulfillment` (header `x-jbh-owner-key`): the owner's dispatch queue, including shipping details.
+- **Nothing contacts, pays or orders from a vendor.** Dispatch stays an owner action.
+
+Configuration (all required; the lane answers `503` until set): `JBH_ORDERS_ENABLED=true`, `JBH_STRIPE_LIVE=false`, `JBH_STRIPE_SECRET_KEY` (a `sk_test_`/`rk_test_` key; live keys are refused), `JBH_STRIPE_WEBHOOK_SECRET`, `JBH_STRIPE_API_VERSION`, `JBH_TEST_ACCOUNT_ID` (the Juss Ray Beauty Co sandbox account; checked against `/v1/account`), `JBH_STOREFRONT_KEY` and `JBH_OWNER_KEY` (32+ characters each), `JBH_STOREFRONT_ORIGIN` (exact https origin), `JBH_CATALOG` (`{ "SKU": { "approved": true, "name", "unitAmount" (cents), "currency": "usd", "vendor" } }`) and `JBH_SHIPPING` (`{ "standard", "express", "freeStandardOver" }` in cents, or `null` for no free tier). Webhook events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`, `charge.dispute.created`.
+
+Not done yet: storefront wiring, a sandbox run against the real Juss Ray Beauty Co test account, a deployed Worker and route, and a live-mode gate.
+
 ## Activation gates
 
 1. Approve each product's actual paid benefits, delivery backend, currency, full recurring price, tax/refund/cancellation/privacy terms. PromptOS's known $1 first month is **not** enough to choose its renewal amount. This version has no introductory-discount automation; do not enable a normal recurring price as a substitute for that offer.
