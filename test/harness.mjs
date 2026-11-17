@@ -15,6 +15,7 @@ export function memoryStorage(){
   return {
     async get(k){return structuredClone(db.get(k));},
     async put(k,v){db.set(k,structuredClone(v));},
+    async delete(k){return db.delete(k);},
     async list({prefix}){return new Map([...db].filter(([k])=>k.startsWith(prefix)));},
     async transaction(fn){const before=structuredClone(db);try{return await fn(this);}catch(e){db=before;throw e;}}
   };
