@@ -351,3 +351,20 @@ test('refund hold blocks replay delivery of a pending private receipt',async()=>
   await worker.fetch(await signed(completed('evt_hold_paid',sessionId)),h.env);
   assert.equal(deliveries,1);
 });
+
+
+test('signed refund hold is forwarded and replay does not duplicate a delivered hold',async()=>{
+  const deliveries=[];
+  const h=jbhEnv({
+    JBH_PRIVATE_RECEIPTS_ENABLED:'true',
+    JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
+    JBH_PRIVATE_WORKER:{fetch:async request=>{deliveries.push(JSON.parse(await request.text()));return new Response('{}',{status:200});}}
+  });
+  const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed(completed('evt_hold_first',sessionId)),h.env);
+  await worker.fetch(await signed(refunded('evt_hold_second')),h.env);
+  assert.deepEqual(deliveries.map(x=>x.state),['awaiting_owner_dispatch','refunded']);
+  assert.equal(deliveries[1].orderId,orderId);
+  await worker.fetch(await signed(refunded('evt_hold_second')),h.env);
+  assert.equal(deliveries.length,2);
+});
