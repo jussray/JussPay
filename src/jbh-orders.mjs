@@ -251,6 +251,9 @@ export class JbhOrderBook{
     const env=this.env,storage=this.state.storage;
     const pending=await storage.get(`private-receipt:${orderId}`);
     if(!pending||pending.delivered===true)return;
+    const order=await storage.get(`order:${orderId}`);
+    const fulfillment=await storage.get(`fulfillment:${orderId}`);
+    if(order?.status!=='paid'||fulfillment?.status!=='awaiting_owner_dispatch')return;
     if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true')return;
     if(!env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32||!env.JBH_PRIVATE_WORKER?.fetch)return;
     const raw=JSON.stringify(pending.payload);
