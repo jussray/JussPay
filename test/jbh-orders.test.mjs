@@ -338,18 +338,18 @@ test('private sandbox receipt is signed, retryable and sent only once after veri
 });
 
 test('refund hold blocks replay delivery of a pending private receipt',async()=>{
-  let deliveries=0;
+  const deliveries=[];
   const h=jbhEnv({
     JBH_PRIVATE_RECEIPTS_ENABLED:'true',
     JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
-    JBH_PRIVATE_WORKER:{fetch:async()=>{deliveries++;return new Response('{}',{status:503});}}
+    JBH_PRIVATE_WORKER:{fetch:async request=>{deliveries.push(JSON.parse(await request.text()));return new Response('{}',{status:503});}}
   });
   const {sessionId}=await paidOrder(h);
   await worker.fetch(await signed(completed('evt_hold_paid',sessionId)),h.env);
-  assert.equal(deliveries,1);
+  assert.deepEqual(deliveries.map(x=>x.state),['awaiting_owner_dispatch']);
   await worker.fetch(await signed(refunded('evt_hold_refund')),h.env);
   await worker.fetch(await signed(completed('evt_hold_paid',sessionId)),h.env);
-  assert.equal(deliveries,1);
+  assert.deepEqual(deliveries.map(x=>x.state),['awaiting_owner_dispatch','refunded','refunded']);
 });
 
 
