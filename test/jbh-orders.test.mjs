@@ -309,3 +309,45 @@ test('an oversized webhook body without Content-Length is refused before bufferi
   const r=await worker.fetch(new Request('https://pay.example/jbh/webhook',{method:'POST',body:big,duplex:'half',headers:{'stripe-signature':'t=1,v1='+'0'.repeat(64)}}),h.env);
   assert.equal(r.status,413);
 });
+
+
+test('private sandbox receipt is signed, retryable and sent only once after verified payment',async()=>{
+  const deliveries=[];
+  let unavailable=true;
+  const h=jbhEnv({
+    JBH_PRIVATE_RECEIPTS_ENABLED:'true',
+    JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
+    JBH_PRIVATE_WORKER:{fetch:async request=>{
+      const raw=await request.text();
+      deliveries.push({raw,signature:request.headers.get('x-jbh-jusspay-signature')});
+      return new Response('{}',{status:unavailable?503:200});
+    }}
+  });
+  const {orderId,sessionId}=await paidOrder(h);
+  assert.equal(deliveries.length,0);
+  await worker.fetch(await signed(completed('evt_private_paid',sessionId)),h.env);
+  assert.equal(deliveries.length,1);
+  const receipt=JSON.parse(deliveries[0].raw);
+  assert.deepEqual(receipt,{eventId:'evt_private_paid',livemode:false,orderId,paymentIntentId:'pi_test_1',state:'awaiting_owner_dispatch'});
+  assert.match(deliveries[0].signature,/^[0-9a-f]{64}$/);
+  unavailable=false;
+  await worker.fetch(await signed(completed('evt_private_paid',sessionId)),h.env);
+  assert.equal(deliveries.length,2);
+  await worker.fetch(await signed(completed('evt_private_paid',sessionId)),h.env);
+  assert.equal(deliveries.length,2);
+});
+
+test('refund hold blocks replay delivery of a pending private receipt',async()=>{
+  let deliveries=0;
+  const h=jbhEnv({
+    JBH_PRIVATE_RECEIPTS_ENABLED:'true',
+    JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
+    JBH_PRIVATE_WORKER:{fetch:async()=>{deliveries++;return new Response('{}',{status:503});}}
+  });
+  const {sessionId}=await paidOrder(h);
+  await worker.fetch(await signed(completed('evt_hold_paid',sessionId)),h.env);
+  assert.equal(deliveries,1);
+  await worker.fetch(await signed(refunded('evt_hold_refund')),h.env);
+  await worker.fetch(await signed(completed('evt_hold_paid',sessionId)),h.env);
+  assert.equal(deliveries,1);
+});
