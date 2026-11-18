@@ -258,7 +258,7 @@ export class JbhOrderBook{
     const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
     const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
     try{
-      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('https://jbh-private.internal/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
       if(response.ok)await storage.put(`private-receipt:${orderId}`,{...pending,delivered:true});
     }catch{
       // Retain the durable pending receipt for a later signed webhook replay.
