@@ -268,11 +268,29 @@ export class JbhOrderBook{
     }
   }
 
+  async forwardPrivateHold(orderId){
+    const env=this.env,storage=this.state.storage;
+    const pending=await storage.get(`private-hold:${orderId}`);
+    if(!pending||pending.delivered===true)return;
+    if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true'||!env.JBH_PRIVATE_WORKER?.fetch||
+       !env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32)return;
+    const raw=JSON.stringify(pending.payload);
+    const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.JBH_PRIVATE_RECEIPT_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
+    const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
+    try{
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      if(response.ok)await storage.put(`private-hold:${orderId}`,{...pending,delivered:true});
+    }catch{
+      // Keep the pending hold for a later webhook replay.
+    }
+  }
+
   async event(event){
     const storage=this.state.storage;
     if(await storage.get(`event:${event.id}`)){
       const existing=await storage.get(`event:${event.id}`);
-      if(existing?.orderId)await this.forwardPrivateReceipt(existing.orderId);
+      if(existing?.orderId){await this.forwardPrivateHold(existing.orderId);await this.forwardPrivateReceipt(existing.orderId);}
       return json({received:true,duplicate:true});
     }
     const o=event.data?.object||{};
@@ -325,12 +343,16 @@ export class JbhOrderBook{
       if(await txn.get(`event:${event.id}`))return;
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
+      if(next && ['refunded','partially_refunded','disputed'].includes(next.status)){
+        await txn.put(`private-hold:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:next.status}});
+      }
       if(queue==='add'){
         await txn.put(`queue:${orderId}`,orderId);
         await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
       }
       await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:Date.now(),...(reason?{note:reason}:{})});
     });
+    await this.forwardPrivateHold(orderId);
     await this.forwardPrivateReceipt(orderId);
     return json({received:true});
   }
