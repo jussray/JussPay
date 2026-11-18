@@ -247,9 +247,31 @@ export class JbhOrderBook{
     return {orderId:orderId||null,charge,pi};
   }
 
+  async forwardPrivateReceipt(orderId){
+    const env=this.env,storage=this.state.storage;
+    const pending=await storage.get(`private-receipt:${orderId}`);
+    if(!pending||pending.delivered===true)return;
+    if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true')return;
+    if(!env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32||!env.JBH_PRIVATE_WORKER?.fetch)return;
+    const raw=JSON.stringify(pending.payload);
+    const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.JBH_PRIVATE_RECEIPT_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
+    const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
+    try{
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('https://jbh-private.internal/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      if(response.ok)await storage.put(`private-receipt:${orderId}`,{...pending,delivered:true});
+    }catch{
+      // Retain the durable pending receipt for a later signed webhook replay.
+    }
+  }
+
   async event(event){
     const storage=this.state.storage;
-    if(await storage.get(`event:${event.id}`))return json({received:true,duplicate:true});
+    if(await storage.get(`event:${event.id}`)){
+      const existing=await storage.get(`event:${event.id}`);
+      if(existing?.orderId)await this.forwardPrivateReceipt(existing.orderId);
+      return json({received:true,duplicate:true});
+    }
     const o=event.data?.object||{};
     let orderId=null,charge=null,pi=null;
     if(event.type.startsWith('checkout.session.'))orderId=(/^cs_/.test(o.id||'')&&await storage.get(`session:${o.id}`))||null;
@@ -300,9 +322,13 @@ export class JbhOrderBook{
       if(await txn.get(`event:${event.id}`))return;
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
-      if(queue==='add')await txn.put(`queue:${orderId}`,orderId);
-      await txn.put(`event:${event.id}`,{type:event.type,processedAt:Date.now(),...(reason?{note:reason}:{})});
+      if(queue==='add'){
+        await txn.put(`queue:${orderId}`,orderId);
+        await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
+      }
+      await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:Date.now(),...(reason?{note:reason}:{})});
     });
+    await this.forwardPrivateReceipt(orderId);
     return json({received:true});
   }
 }
