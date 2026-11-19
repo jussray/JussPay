@@ -2,7 +2,7 @@
 // jussbeautifulhair.com, sold by the Juss Ray Beauty Co Stripe account. Separate fact
 // domain from the five-app subscription core: its own Stripe secrets, webhook secret,
 // account binding and Durable Object (JbhOrderBook). OFF unless JBH_ORDERS_ENABLED=true,
-// and sandbox-only in this version: live keys and live events are rejected.
+// with independently gated sandbox and live credentials.
 //
 // Flow: the storefront Worker (server-side, holding JBH_STOREFRONT_KEY) posts SKUs and
 // quantities; prices come only from the server catalog JBH_CATALOG. A paid order is
@@ -11,7 +11,7 @@
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
 
 // Juss Ray Beauty Co, read via the Stripe connector 2026-11-17. Reserved for the future
-// live-mode gate; this sandbox-only version checks JBH_TEST_ACCOUNT_ID instead.
+// live-mode gate; sandbox uses JBH_TEST_ACCOUNT_ID.
 export const JBH_LIVE_ACCOUNT='acct_1TfbELRp7J40bCrl';
 export const JBH_EVENTS=new Set(['checkout.session.completed','checkout.session.async_payment_succeeded','checkout.session.async_payment_failed','checkout.session.expired','charge.refunded','charge.dispute.created']);
 const MAX_LINES=10,MAX_QTY=10;
@@ -35,11 +35,21 @@ export function jbhShipping(env){
   return s;
 }
 
+export function jbhLive(env){
+  if(env.JBH_STRIPE_LIVE!=='true'&&env.JBH_STRIPE_LIVE!=='false')fail(503,'jbh_mode_required');
+  return env.JBH_STRIPE_LIVE==='true';
+}
+const jbhExpectedAccount=env=>jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID;
+
 export function jbhReady(env,webhook=false){
   if(env.JBH_ORDERS_ENABLED!=='true')fail(503,'jbh_orders_disabled');
-  if(env.JBH_STRIPE_LIVE!=='false')fail(503,'jbh_sandbox_only');
-  if(!/^(sk|rk)_test_/.test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,'jbh_sandbox_key_required');
-  if(!env.JBH_STRIPE_WEBHOOK_SECRET||!env.JBH_STRIPE_API_VERSION||!env.JBH_ORDERS||!/^acct_[a-zA-Z0-9]+$/.test(env.JBH_TEST_ACCOUNT_ID||''))fail(503,'jbh_not_configured');
+  const live=jbhLive(env);
+  if(live){
+    if(env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+    if(!/^(sk|rk)_live_[A-Za-z0-9]+$/.test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,'jbh_live_key_required');
+    if(env.JBH_LIVE_ACCOUNT_ID!==JBH_LIVE_ACCOUNT)fail(503,'jbh_live_account_not_configured');
+  }else if(!/^(sk|rk)_test_[A-Za-z0-9]+$/.test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,'jbh_sandbox_key_required');
+  if(!env.JBH_STRIPE_WEBHOOK_SECRET||!env.JBH_STRIPE_API_VERSION||!env.JBH_ORDERS||(!live&&!/^acct_[a-zA-Z0-9]+$/.test(env.JBH_TEST_ACCOUNT_ID||'')))fail(503,'jbh_not_configured');
   if(!webhook){
     if(!env.JBH_STOREFRONT_KEY||env.JBH_STOREFRONT_KEY.length<32)fail(503,'jbh_not_configured');
     let origin;try{origin=new URL(env.JBH_STOREFRONT_ORIGIN).origin;}catch{fail(503,'jbh_not_configured');}
@@ -52,7 +62,7 @@ export const jbhStripe=(env,path,method,data,key)=>stripe({STRIPE_SECRET_KEY:env
 
 async function jbhAccount(env,forPurchase){
   const a=await jbhStripe(env,'account');
-  if(a.id!==env.JBH_TEST_ACCOUNT_ID)fail(503,'jbh_stripe_account_mismatch');
+  if(a.id!==jbhExpectedAccount(env))fail(503,'jbh_stripe_account_mismatch');
   if(forPurchase&&(!a.charges_enabled||!a.details_submitted))fail(503,'jbh_stripe_account_not_ready');
 }
 
@@ -89,7 +99,7 @@ export function priceOrder(env,input){
 // The provider's own session is the only payment truth: every load-bearing field must match.
 export function reconcileSession(session,order){
   return session?.id===order.sessionId&&session.client_reference_id===order.id&&session.metadata?.jbh_order_id===order.id
-    &&session.mode==='payment'&&session.livemode===false&&session.currency===order.currency
+    &&session.mode==='payment'&&session.livemode===order.livemode&&session.currency===order.currency
     &&session.amount_subtotal===order.subtotal&&session.amount_total===order.total&&session.total_details?.amount_shipping===order.shipping;
 }
 
@@ -101,7 +111,7 @@ async function jsonBody(request,limit){
   return value;
 }
 
-const book=env=>env.JBH_ORDERS.get(env.JBH_ORDERS.idFromName('test:jbh-orders'));
+const book=env=>env.JBH_ORDERS.get(env.JBH_ORDERS.idFromName(`${jbhLive(env)?'live':'test'}:jbh-orders`));
 const toBook=(env,path,body)=>book(env).fetch(new Request(`https://jbh-orders.internal${path}`,{method:'POST',body:JSON.stringify(body)}));
 
 async function requireOwner(request,env){
@@ -118,7 +128,8 @@ export async function handleJbh(request,env){
       const raw=await boundedText(request,262144);
       if(!await verifySignature(raw,request.headers.get('stripe-signature'),env.JBH_STRIPE_WEBHOOK_SECRET))fail(400,'invalid_signature');
       let event;try{event=JSON.parse(raw);}catch{fail(400,'invalid_event');}
-      if(!/^evt_/.test(event.id||'')||event.livemode!==false||(event.account&&event.account!==env.JBH_TEST_ACCOUNT_ID))fail(400,'wrong_event_context');
+      if(!/^evt_/.test(event.id||'')||event.livemode!==jbhLive(env)||(event.account&&event.account!==jbhExpectedAccount(env)))fail(400,'wrong_event_context');
+      await jbhAccount(env,false);
       if(!JBH_EVENTS.has(event.type))return json({received:true,ignored:true});
       return toBook(env,'/event',{event});
     }
@@ -187,7 +198,7 @@ export class JbhOrderBook{
       if(order.sessionUrl)return json({orderId:order.id,url:order.sessionUrl});
     }else{
       id=`jbho_${crypto.randomUUID()}`;
-      order={id,status:'pending',...priced,fingerprint,createdAt:Date.now(),sessionId:null,sessionUrl:null,paymentIntent:null};
+      order={id,status:'pending',...priced,livemode:jbhLive(env),fingerprint,createdAt:Date.now(),sessionId:null,sessionUrl:null,paymentIntent:null};
       // The order and request mapping exist before the provider side effect, so a retry
       // reuses the same Stripe idempotency key and an unknown outcome stays reconcilable.
       await storage.put(`order:${id}`,order);
@@ -209,7 +220,7 @@ export class JbhOrderBook{
       form[`line_items[${i}][price_data][product_data][metadata][jbh_sku]`]=x.sku;
     });
     const s=await jbhStripe(env,'checkout/sessions','POST',form,`jbh-checkout-${id}`);
-    if(!/^cs_test_/.test(s.id||'')||typeof s.url!=='string')fail(502,'stripe_unavailable');
+    if(!new RegExp(`^cs_${jbhLive(env)?'live':'test'}_`).test(s.id||'')||s.livemode!==jbhLive(env)||typeof s.url!=='string')fail(502,'stripe_unavailable');
     await storage.put(`order:${id}`,{...order,sessionId:s.id,sessionUrl:s.url});
     await storage.put(`session:${s.id}`,id);
     return json({orderId:id,url:s.url});
@@ -242,7 +253,7 @@ export class JbhOrderBook{
     if(!orderId){
       const intent=await jbhStripe(this.env,`payment_intents/${encodeURIComponent(pi)}`);
       const candidate=intent.metadata?.jbh_order_id;
-      if(intent.livemode===false&&ORDER_ID.test(candidate||'')&&await this.state.storage.get(`order:${candidate}`))orderId=candidate;
+      if(intent.livemode===jbhLive(this.env)&&ORDER_ID.test(candidate||'')&&await this.state.storage.get(`order:${candidate}`))orderId=candidate;
     }
     return {orderId:orderId||null,charge,pi};
   }
