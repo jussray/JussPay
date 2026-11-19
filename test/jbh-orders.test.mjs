@@ -210,7 +210,7 @@ test('refunds and disputes hold dispatch and are never undone by a later paid ev
 });
 
 test('reconcileSession requires every load-bearing field',()=>{
-  const order={id:'jbho_1',sessionId:'cs_test_1',currency:'usd',subtotal:100,total:900,shipping:800};
+  const order={id:'jbho_1',sessionId:'cs_test_1',livemode:false,currency:'usd',subtotal:100,total:900,shipping:800};
   const s={id:'cs_test_1',client_reference_id:'jbho_1',metadata:{jbh_order_id:'jbho_1'},mode:'payment',livemode:false,currency:'usd',amount_subtotal:100,amount_total:900,total_details:{amount_shipping:800}};
   assert.equal(reconcileSession(s,order),true);
   assert.equal(reconcileSession({...s,metadata:{jbh_order_id:'jbho_2'}},order),false);
