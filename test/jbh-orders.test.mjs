@@ -345,3 +345,22 @@ test('live Beauty Co webhooks reject sandbox events and wrong account',async()=>
   assert.equal((await wrongAccount.json()).error,'wrong_event_context');
   assert.equal(h.calls.length,0);
 });
+
+
+test('readiness reports isolated JBH gates without secrets or provider calls',async()=>{
+ const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_STRIPE_LIVE:'false',JBH_STRIPE_SECRET_KEY:'sk_test_FAKE'});
+ const r=await worker.fetch(get('/jbh/readiness'),h.env);
+ assert.equal(r.status,200);
+ const payload=await r.json();
+ assert.equal(payload.checkoutEnabled,false);
+ assert.equal(payload.mode,'sandbox');
+ assert.equal(payload.liveChargesApproved,false);
+ assert.equal(payload.providerVerified,false);
+ assert.equal(payload.checkoutVerified,false);
+ assert.equal(payload.durableOrderBookBound,true);
+ assert.equal(h.calls.length,0);
+ assert.equal(JSON.stringify(payload).includes('sk_test_'),false);
+ assert.equal(JSON.stringify(payload).includes(STOREFRONT_KEY),false);
+ const method=await worker.fetch(post('/jbh/readiness',{}),h.env);
+ assert.equal(method.status,405);
+});
