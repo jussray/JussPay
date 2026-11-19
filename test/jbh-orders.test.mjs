@@ -29,11 +29,11 @@ function jbhEnv(overrides={}){
       if(u==='account')return Response.json({id:env.__accountId||'acct_1TestJbhSandbox',charges_enabled:true,details_submitted:true});
       if(u==='checkout/sessions'&&init.method==='POST'){
         const k=init.headers['Idempotency-Key'];if(byKey.has(k))return Response.json(sessions.get(byKey.get(k)));
-        const b=Object.fromEntries(init.body);const id=`cs_test_${sessions.size+1}`;byKey.set(k,id);
-        intents.set(`pi_test_${sessions.size+1}`,{id:`pi_test_${sessions.size+1}`,livemode:false,metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
+        const b=Object.fromEntries(init.body);const id=`cs_${env.JBH_STRIPE_LIVE==='true'?'live':'test'}_${sessions.size+1}`;byKey.set(k,id);
+        intents.set(`pi_${env.JBH_STRIPE_LIVE==='true'?'live':'test'}_${sessions.size+1}`,{id:`pi_test_${sessions.size+1}`,livemode:env.JBH_STRIPE_LIVE==='true',metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
         let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++)subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(b[`line_items[${i}][price_data][unit_amount]`]);
         const shipping=Number(b['shipping_options[0][shipping_rate_data][fixed_amount][amount]']);
-        sessions.set(id,{id,object:'checkout.session',mode:'payment',livemode:false,currency:'usd',client_reference_id:b.client_reference_id,metadata:{jbh_order_id:b['metadata[jbh_order_id]']},amount_subtotal:subtotal,amount_total:subtotal+shipping,total_details:{amount_shipping:shipping},payment_status:'unpaid',status:'open',url:`https://checkout.stripe.com/c/pay/${id}`});
+        sessions.set(id,{id,object:'checkout.session',mode:'payment',livemode:env.JBH_STRIPE_LIVE==='true',currency:'usd',client_reference_id:b.client_reference_id,metadata:{jbh_order_id:b['metadata[jbh_order_id]']},amount_subtotal:subtotal,amount_total:subtotal+shipping,total_details:{amount_shipping:shipping},payment_status:'unpaid',status:'open',url:`https://checkout.stripe.com/c/pay/${id}`});
         return Response.json(sessions.get(id));
       }
       if(u.startsWith('checkout/sessions/'))return Response.json(sessions.get(decodeURIComponent(u.split('/')[2])));
@@ -65,7 +65,7 @@ async function paidOrder(h,items=[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1},{sku:'
   assert.equal(r.status,200);
   const {orderId}=await r.json();
   const sessionId=[...h.sessions.keys()].at(-1);
-  Object.assign(h.sessions.get(sessionId),{payment_status:'paid',status:'complete',payment_intent:`pi_test_${sessionId.split('_').pop()}`,
+  Object.assign(h.sessions.get(sessionId),{payment_status:'paid',status:'complete',payment_intent:`pi_${h.env.JBH_STRIPE_LIVE==='true'?'live':'test'}_${sessionId.split('_').pop()}`,
     collected_information:{shipping_details:{name:'Test Buyer',address:{line1:'1 Test St',city:'Testville',state:'MD',postal_code:'21201',country:'US'}}},
     customer_details:{email:'buyer@example.test',phone:'+15555550100'}});
   return {orderId,sessionId};
@@ -78,7 +78,7 @@ test('the hair lane is off unless JBH_ORDERS_ENABLED is true',async()=>{
 });
 
 test('live keys and live mode are refused in this sandbox-only version',async()=>{
-  for(const [o,code] of [[{JBH_STRIPE_SECRET_KEY:'sk_live_x'},'jbh_sandbox_key_required'],[{JBH_STRIPE_LIVE:'true'},'jbh_sandbox_only']]){
+  for(const [o,code] of [[{JBH_STRIPE_SECRET_KEY:'sk_live_x'},'jbh_sandbox_key_required'],[{JBH_STRIPE_LIVE:'true'},'jbh_live_not_approved']]){
     const h=jbhEnv(o);const r=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
     assert.equal((await r.json()).error,code);assert.equal(h.calls.length,0);
   }
@@ -308,4 +308,40 @@ test('an oversized webhook body without Content-Length is refused before bufferi
   const big=new ReadableStream({start(c){for(let i=0;i<70;i++)c.enqueue(new TextEncoder().encode('x'.repeat(4096)));c.close();}});
   const r=await worker.fetch(new Request('https://pay.example/jbh/webhook',{method:'POST',body:big,duplex:'half',headers:{'stripe-signature':'t=1,v1='+'0'.repeat(64)}}),h.env);
   assert.equal(r.status,413);
+});
+
+// Live mode stays disabled without an explicit release switch and a matching Beauty Co account.
+test('live Beauty Co checkout is gated and rejects wrong mode, key and account before charge',async()=>{
+  const live={JBH_STRIPE_LIVE:'true',JBH_LIVE_CHARGES_APPROVED:'true',JBH_LIVE_ACCOUNT_ID:JBH_LIVE_ACCOUNT,JBH_STRIPE_SECRET_KEY:'sk_live_FAKE'};
+  const attempt=async overrides=>{
+    const h=jbhEnv({...live,...overrides});
+    const r=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+    return {h,r,body:await r.json()};
+  };
+  for(const [overrides,code] of [
+    [{JBH_LIVE_CHARGES_APPROVED:'false'},'jbh_live_not_approved'],
+    [{JBH_STRIPE_SECRET_KEY:'sk_test_FAKE'},'jbh_live_key_required'],
+    [{JBH_LIVE_ACCOUNT_ID:'acct_other'},'jbh_live_account_not_configured']
+  ]){
+    const {h,body}=await attempt(overrides);
+    assert.equal(body.error,code);assert.equal(h.calls.length,0);
+  }
+  const wrong=await attempt({__accountId:'acct_other'});
+  assert.equal(wrong.body.error,'jbh_stripe_account_mismatch');
+  assert.equal(wrong.h.calls.some(c=>c.path==='checkout/sessions'),false);
+  const h=jbhEnv({...live,__accountId:JBH_LIVE_ACCOUNT});
+  const r=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+  assert.equal(r.status,200);
+  assert.equal(h.calls.filter(c=>c.path==='checkout/sessions').length,1);
+  assert.match((await r.json()).url,/cs_live_/);
+});
+
+test('live Beauty Co webhooks reject sandbox events and wrong account',async()=>{
+  const h=jbhEnv({JBH_STRIPE_LIVE:'true',JBH_LIVE_CHARGES_APPROVED:'true',JBH_LIVE_ACCOUNT_ID:JBH_LIVE_ACCOUNT,JBH_STRIPE_SECRET_KEY:'sk_live_FAKE',__accountId:JBH_LIVE_ACCOUNT});
+  const event={...completed('evt_live','cs_live_1'),livemode:true};
+  const wrongMode=await worker.fetch(await signed({...event,livemode:false}),h.env);
+  assert.equal((await wrongMode.json()).error,'wrong_event_context');
+  const wrongAccount=await worker.fetch(await signed({...event,account:'acct_other'}),h.env);
+  assert.equal((await wrongAccount.json()).error,'wrong_event_context');
+  assert.equal(h.calls.length,0);
 });
