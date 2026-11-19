@@ -122,6 +122,17 @@ async function requireOwner(request,env){
 export async function handleJbh(request,env){
   const path=new URL(request.url).pathname;
   try{
+    // Storefront discovery must prove the private key, configured mode and Stripe account.
+    // A disabled or unconfigured lane never advertises checkout readiness.
+    if(path==='/jbh/health'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      jbhReady(env);
+      if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
+      if(!Object.keys(jbhCatalog(env)).length)fail(503,'jbh_catalog_invalid');
+      jbhShipping(env);
+      await jbhAccount(env,true);
+      return json({ready:true,mode:jbhLive(env)?'live':'sandbox',chargesEnabled:true});
+    }
     if(path==='/jbh/webhook'){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
       jbhReady(env,true);
