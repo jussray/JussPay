@@ -75,6 +75,12 @@ export default {async fetch(request,env){try{
   if(url.pathname==='/catalog' && request.method==='GET'){
     const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({id,name,purchaseStatus:operational&&catalog[id]?'requires_provider_validation':'unavailable',providerAvailabilityVerified:false,offerConfigured:Boolean(catalog[id]),...(catalog[id]?{unitAmount:catalog[id].unitAmount,currency:catalog[id].currency,interval:catalog[id].interval,termsUrl:catalog[id].termsUrl,entitlements:catalog[id].entitlements}:{})})));
   }
+  // Operational readiness only: no credentials, account IDs, prices or buyer data.
+  // This endpoint never enables checkout or contacts Stripe.
+  if(url.pathname==='/jbh/readiness'){
+    if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+    return json({service:'JussPay',lane:'jbh',checkoutEnabled:env.JBH_ORDERS_ENABLED==='true',mode:env.JBH_STRIPE_LIVE==='true'?'live':env.JBH_STRIPE_LIVE==='false'?'sandbox':'unconfigured',liveChargesApproved:env.JBH_LIVE_CHARGES_APPROVED==='true',durableOrderBookBound:!!env.JBH_ORDERS,storefrontOriginConfigured:typeof env.JBH_STOREFRONT_ORIGIN==='string'&&env.JBH_STOREFRONT_ORIGIN.startsWith('https://'),providerVerified:false,checkoutVerified:false});
+  }
   // JBH hair orders: own gate, keys, account and Durable Object (src/jbh-orders.mjs).
   if(url.pathname.startsWith('/jbh/'))return await handleJbh(request,env);
   const ORDER_PATHS=['/subscriptions/orders','/subscriptions/checkout','/subscriptions/status','/subscriptions/entitlement','/orders/checkout'];
