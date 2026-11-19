@@ -129,6 +129,17 @@ export async function handleJbh(request,env){
       await jbhAccount(env,false);
       return toBook(env,'/event',{event});
     }
+    if(path==='/jbh/health'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      jbhReady(env);
+      if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
+      const live=jbhLive(env);
+      if(live&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+      if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
+      jbhShipping(env);
+      await jbhAccount(env,true);
+      return json({ready:true,mode:live?'live':'sandbox',chargesEnabled:true});
+    }
     if(path==='/jbh/checkout'||path.startsWith('/jbh/orders/')){
       jbhReady(env);
       if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
