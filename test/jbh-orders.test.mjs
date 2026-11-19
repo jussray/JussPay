@@ -364,3 +364,20 @@ test('readiness reports isolated JBH gates without secrets or provider calls',as
  const method=await worker.fetch(post('/jbh/readiness',{}),h.env);
  assert.equal(method.status,405);
 });
+
+
+test('private health refuses disabled, unauthenticated and mismatched Stripe account',async()=>{
+ const disabled=jbhEnv({JBH_ORDERS_ENABLED:'false'});
+ assert.equal((await worker.fetch(get('/jbh/health',sf),disabled.env)).status,503);
+ assert.equal(disabled.calls.length,0);
+ const h=jbhEnv();
+ assert.equal((await worker.fetch(get('/jbh/health'),h.env)).status,401);
+ assert.equal(h.calls.length,0);
+ const wrong=jbhEnv({__accountId:'acct_Wrong'});
+ assert.equal((await worker.fetch(get('/jbh/health',sf),wrong.env)).status,503);
+ const ok=await worker.fetch(get('/jbh/health',sf),h.env);
+ assert.equal(ok.status,200);
+ assert.deepEqual(await ok.json(),{ready:true,mode:'sandbox',chargesEnabled:true});
+ assert.equal(h.calls.filter(x=>x.path==='account').length,1);
+ assert.equal((await worker.fetch(post('/jbh/health',{},sf),h.env)).status,405);
+});
