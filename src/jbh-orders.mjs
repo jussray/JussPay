@@ -2,7 +2,7 @@
 // jussbeautifulhair.com, sold by the Juss Ray Beauty Co Stripe account. Separate fact
 // domain from the five-app subscription core: its own Stripe secrets, webhook secret,
 // account binding and Durable Object (JbhOrderBook). OFF unless JBH_ORDERS_ENABLED=true,
-// and sandbox-only in this version: live keys and live events are rejected.
+// defaulting to sandbox; live checkout requires a separate explicit approval switch.
 //
 // Flow: the storefront Worker (server-side, holding JBH_STOREFRONT_KEY) posts SKUs and
 // quantities; prices come only from the server catalog JBH_CATALOG. A paid order is
@@ -10,8 +10,8 @@
 // awaiting_owner_dispatch. Nothing here contacts, pays or orders from a vendor.
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
 
-// Juss Ray Beauty Co, read via the Stripe connector 2026-11-17. Reserved for the future
-// live-mode gate; this sandbox-only version checks JBH_TEST_ACCOUNT_ID instead.
+// Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
+// account ID and never shares the live order book.
 export const JBH_LIVE_ACCOUNT='acct_1TfbELRp7J40bCrl';
 export const JBH_EVENTS=new Set(['checkout.session.completed','checkout.session.async_payment_succeeded','checkout.session.async_payment_failed','checkout.session.expired','charge.refunded','charge.dispute.created']);
 const MAX_LINES=10,MAX_QTY=10;
@@ -35,11 +35,17 @@ export function jbhShipping(env){
   return s;
 }
 
+// No implicit mode: every credential, event and session must agree with this switch.
+export function jbhLive(env){
+  if(env.JBH_STRIPE_LIVE!=='true'&&env.JBH_STRIPE_LIVE!=='false')fail(503,'jbh_mode_invalid');
+  return env.JBH_STRIPE_LIVE==='true';
+}
+
 export function jbhReady(env,webhook=false){
   if(env.JBH_ORDERS_ENABLED!=='true')fail(503,'jbh_orders_disabled');
-  if(env.JBH_STRIPE_LIVE!=='false')fail(503,'jbh_sandbox_only');
-  if(!/^(sk|rk)_test_/.test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,'jbh_sandbox_key_required');
-  if(!env.JBH_STRIPE_WEBHOOK_SECRET||!env.JBH_STRIPE_API_VERSION||!env.JBH_ORDERS||!/^acct_[a-zA-Z0-9]+$/.test(env.JBH_TEST_ACCOUNT_ID||''))fail(503,'jbh_not_configured');
+  const live=jbhLive(env);
+  if(!new RegExp(`^(sk|rk)_${live?'live':'test'}_`).test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,live?'jbh_live_key_required':'jbh_sandbox_key_required');
+  if(!env.JBH_STRIPE_WEBHOOK_SECRET||!env.JBH_STRIPE_API_VERSION||!env.JBH_ORDERS||(!live&&!/^acct_[a-zA-Z0-9]+$/.test(env.JBH_TEST_ACCOUNT_ID||'')))fail(503,'jbh_not_configured');
   if(!webhook){
     if(!env.JBH_STOREFRONT_KEY||env.JBH_STOREFRONT_KEY.length<32)fail(503,'jbh_not_configured');
     let origin;try{origin=new URL(env.JBH_STOREFRONT_ORIGIN).origin;}catch{fail(503,'jbh_not_configured');}
@@ -52,7 +58,7 @@ export const jbhStripe=(env,path,method,data,key)=>stripe({STRIPE_SECRET_KEY:env
 
 async function jbhAccount(env,forPurchase){
   const a=await jbhStripe(env,'account');
-  if(a.id!==env.JBH_TEST_ACCOUNT_ID)fail(503,'jbh_stripe_account_mismatch');
+  if(a.id!==(jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID))fail(503,'jbh_stripe_account_mismatch');
   if(forPurchase&&(!a.charges_enabled||!a.details_submitted))fail(503,'jbh_stripe_account_not_ready');
 }
 
@@ -87,9 +93,9 @@ export function priceOrder(env,input){
 }
 
 // The provider's own session is the only payment truth: every load-bearing field must match.
-export function reconcileSession(session,order){
+export function reconcileSession(session,order,live=false){
   return session?.id===order.sessionId&&session.client_reference_id===order.id&&session.metadata?.jbh_order_id===order.id
-    &&session.mode==='payment'&&session.livemode===false&&session.currency===order.currency
+    &&session.mode==='payment'&&session.livemode===live&&session.currency===order.currency
     &&session.amount_subtotal===order.subtotal&&session.amount_total===order.total&&session.total_details?.amount_shipping===order.shipping;
 }
 
@@ -101,7 +107,7 @@ async function jsonBody(request,limit){
   return value;
 }
 
-const book=env=>env.JBH_ORDERS.get(env.JBH_ORDERS.idFromName('test:jbh-orders'));
+const book=env=>env.JBH_ORDERS.get(env.JBH_ORDERS.idFromName(`${jbhLive(env)?'live':'test'}:jbh-orders`));
 const toBook=(env,path,body)=>book(env).fetch(new Request(`https://jbh-orders.internal${path}`,{method:'POST',body:JSON.stringify(body)}));
 
 async function requireOwner(request,env){
@@ -118,8 +124,9 @@ export async function handleJbh(request,env){
       const raw=await boundedText(request,262144);
       if(!await verifySignature(raw,request.headers.get('stripe-signature'),env.JBH_STRIPE_WEBHOOK_SECRET))fail(400,'invalid_signature');
       let event;try{event=JSON.parse(raw);}catch{fail(400,'invalid_event');}
-      if(!/^evt_/.test(event.id||'')||event.livemode!==false||(event.account&&event.account!==env.JBH_TEST_ACCOUNT_ID))fail(400,'wrong_event_context');
+      if(!/^evt_/.test(event.id||'')||event.livemode!==jbhLive(env)||(event.account&&event.account!==(jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID)))fail(400,'wrong_event_context');
       if(!JBH_EVENTS.has(event.type))return json({received:true,ignored:true});
+      await jbhAccount(env,false);
       return toBook(env,'/event',{event});
     }
     if(path==='/jbh/checkout'||path.startsWith('/jbh/orders/')){
@@ -127,6 +134,7 @@ export async function handleJbh(request,env){
       if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
       if(path==='/jbh/checkout'){
         if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+        if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
         const input=await jsonBody(request,4096);
         // The storefront sends one requestId per shopper attempt and reuses it on retry.
         if(!REQUEST_ID.test(input.requestId||''))fail(400,'request_id_required');
@@ -178,6 +186,7 @@ export class JbhOrderBook{
 
   async checkout(requestId,priced){
     const env=this.env,storage=this.state.storage;
+    if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
     const fingerprint=await digest(JSON.stringify([priced.items.map(x=>[x.sku,x.quantity,x.unitAmount]),priced.shipping,priced.total]));
     let id=await storage.get(`request:${requestId}`);
     let order=id?await storage.get(`order:${id}`):null;
@@ -208,8 +217,10 @@ export class JbhOrderBook{
       form[`line_items[${i}][price_data][product_data][name]`]=x.name;
       form[`line_items[${i}][price_data][product_data][metadata][jbh_sku]`]=x.sku;
     });
+    // Recheck the merchant inside the order book immediately before the charge-capable request.
+    await jbhAccount(env,true);
     const s=await jbhStripe(env,'checkout/sessions','POST',form,`jbh-checkout-${id}`);
-    if(!/^cs_test_/.test(s.id||'')||typeof s.url!=='string')fail(502,'stripe_unavailable');
+    if(!new RegExp(`^cs_${jbhLive(env)?'live':'test'}_`).test(s.id||'')||s.livemode!==jbhLive(env)||typeof s.url!=='string')fail(502,'stripe_unavailable');
     await storage.put(`order:${id}`,{...order,sessionId:s.id,sessionUrl:s.url});
     await storage.put(`session:${s.id}`,id);
     return json({orderId:id,url:s.url});
@@ -236,20 +247,67 @@ export class JbhOrderBook{
   async orderForCharge(chargeId){
     if(!/^ch_/.test(chargeId||''))fail(400,'missing_charge');
     const charge=await jbhStripe(this.env,`charges/${encodeURIComponent(chargeId)}`);
+    // Live charge evidence must explicitly be live. Legacy sandbox fixtures omit livemode.
+    if(jbhLive(this.env)?charge.livemode!==true:charge.livemode===true)fail(400,'wrong_charge_context');
     const pi=typeof charge.payment_intent==='string'?charge.payment_intent:charge.payment_intent?.id;
     if(!/^pi_/.test(pi||''))return {orderId:null,charge};
     let orderId=await this.state.storage.get(`pi:${pi}`);
     if(!orderId){
       const intent=await jbhStripe(this.env,`payment_intents/${encodeURIComponent(pi)}`);
       const candidate=intent.metadata?.jbh_order_id;
-      if(intent.livemode===false&&ORDER_ID.test(candidate||'')&&await this.state.storage.get(`order:${candidate}`))orderId=candidate;
+      if(intent.livemode===jbhLive(this.env)&&ORDER_ID.test(candidate||'')&&await this.state.storage.get(`order:${candidate}`))orderId=candidate;
     }
     return {orderId:orderId||null,charge,pi};
   }
 
+  async forwardPrivateReceipt(orderId){
+    const env=this.env,storage=this.state.storage;
+    if(jbhLive(env))return; // Sandbox-only private receipt target must never receive live PII.
+    const pending=await storage.get(`private-receipt:${orderId}`);
+    if(!pending||pending.delivered===true)return;
+    const order=await storage.get(`order:${orderId}`);
+    const fulfillment=await storage.get(`fulfillment:${orderId}`);
+    if(order?.status!=='paid'||fulfillment?.status!=='awaiting_owner_dispatch')return;
+    if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true')return;
+    if(!env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32||!env.JBH_PRIVATE_WORKER?.fetch)return;
+    const raw=JSON.stringify(pending.payload);
+    const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.JBH_PRIVATE_RECEIPT_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
+    const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
+    try{
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      if(response.ok)await storage.put(`private-receipt:${orderId}`,{...pending,delivered:true});
+    }catch{
+      // Retain the durable pending receipt for a later signed webhook replay.
+    }
+  }
+
+  async forwardPrivateHold(orderId){
+    const env=this.env,storage=this.state.storage;
+    if(jbhLive(env))return; // Live hold delivery needs a separately reviewed endpoint.
+    const pending=await storage.get(`private-hold:${orderId}`);
+    if(!pending||pending.delivered===true)return;
+    if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true'||!env.JBH_PRIVATE_WORKER?.fetch||
+       !env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32)return;
+    const raw=JSON.stringify(pending.payload);
+    const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.JBH_PRIVATE_RECEIPT_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+    const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
+    const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
+    try{
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      if(response.ok)await storage.put(`private-hold:${orderId}`,{...pending,delivered:true});
+    }catch{
+      // Keep the pending hold for a later webhook replay.
+    }
+  }
+
   async event(event){
     const storage=this.state.storage;
-    if(await storage.get(`event:${event.id}`))return json({received:true,duplicate:true});
+    if(await storage.get(`event:${event.id}`)){
+      const existing=await storage.get(`event:${event.id}`);
+      if(existing?.orderId){await this.forwardPrivateHold(existing.orderId);await this.forwardPrivateReceipt(existing.orderId);}
+      return json({received:true,duplicate:true});
+    }
     const o=event.data?.object||{};
     let orderId=null,charge=null,pi=null;
     if(event.type.startsWith('checkout.session.'))orderId=(/^cs_/.test(o.id||'')&&await storage.get(`session:${o.id}`))||null;
@@ -263,7 +321,7 @@ export class JbhOrderBook{
     if(event.type.startsWith('checkout.session.')){
       await jbhAccount(this.env,false);
       const session=await jbhStripe(this.env,`checkout/sessions/${encodeURIComponent(order.sessionId)}`);
-      if(!reconcileSession(session,order)){
+      if(!reconcileSession(session,order,jbhLive(this.env))){
         await this.receipt(orderId,'session_mismatch',{event:event.id,type:event.type});
         await storage.put(`event:${event.id}`,{type:event.type,mismatch:true,processedAt:Date.now()});
         return json({received:true,reconciliation_required:true});
@@ -300,9 +358,17 @@ export class JbhOrderBook{
       if(await txn.get(`event:${event.id}`))return;
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
-      if(queue==='add')await txn.put(`queue:${orderId}`,orderId);
-      await txn.put(`event:${event.id}`,{type:event.type,processedAt:Date.now(),...(reason?{note:reason}:{})});
+      if(next && ['refunded','partially_refunded','disputed'].includes(next.status)){
+        await txn.put(`private-hold:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:next.status}});
+      }
+      if(queue==='add'){
+        await txn.put(`queue:${orderId}`,orderId);
+        await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
+      }
+      await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:Date.now(),...(reason?{note:reason}:{})});
     });
+    await this.forwardPrivateHold(orderId);
+    await this.forwardPrivateReceipt(orderId);
     return json({received:true});
   }
 }

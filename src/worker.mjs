@@ -68,6 +68,15 @@ export async function boundedText(request,limit){
 async function routeUser(env,subject,path,body){return env.BILLING.get(env.BILLING.idFromName(`${env.STRIPE_LIVE==='true'?'live':'test'}:${subject}`)).fetch(new Request(`https://billing.internal${path}`,{method:'POST',body:JSON.stringify({...body,subject})}));}
 export default {async fetch(request,env){try{
   const url=new URL(request.url);
+  // A deploy receipt is independent of Stripe merchant/payment readiness.
+  if(url.pathname==='/version'){
+    if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+    const sha=env.RELEASE_SHA;
+    if(typeof sha!=='string' || !/^[0-9a-f]{40}$/i.test(sha)){
+      return json({ok:false,sha:null,error:'release_sha_unconfigured'},503);
+    }
+    return json({ok:true,sha,service:'JussPay'});
+  }
   if(url.pathname==='/health' && request.method==='GET'){
     let configured=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold'||!Object.keys(plans(env)).length)fail(503,'no_approved_offers');}catch{configured=false;}
     return json({service:'JussPay',configured,livePaymentsVerified:false},configured?200:503);
