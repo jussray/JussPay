@@ -71,6 +71,54 @@ async function paidOrder(h,items=[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1},{sku:'
   return {orderId,sessionId};
 }
 
+test('health requires a matching storefront secret and never opens a payment session',async()=>{
+  const h=jbhEnv();
+  const unauthorized=await worker.fetch(get('/jbh/health'),h.env);
+  assert.equal(unauthorized.status,401);
+  assert.equal((await unauthorized.json()).error,'storefront_key_required');
+  assert.equal(h.calls.length,0);
+  const ready=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(ready.status,200);
+  assert.deepEqual(await ready.json(),{ready:true,mode:'sandbox',chargesEnabled:true});
+  assert.equal(h.calls.some(c=>c.path==='checkout/sessions'),false);
+  const invalidMethod=await worker.fetch(post('/jbh/health',{},sf),h.env);
+  assert.equal(invalidMethod.status,405);
+  h.env.JBH_ORDERS_ENABLED='false';
+  const disabled=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(disabled.status,503);
+  assert.equal((await disabled.json()).error,'jbh_orders_disabled');
+});
+
+test('health refuses live checkout without approval and the exact Beauty Co account',async()=>{
+  const h=jbhEnv({JBH_STRIPE_LIVE:'true',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE'});
+  const held=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(held.status,503);
+  assert.equal((await held.json()).error,'jbh_live_not_approved');
+  assert.equal(h.calls.length,0);
+  h.env.JBH_LIVE_CHARGES_APPROVED='true';
+  const ready=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(ready.status,200);
+  assert.deepEqual(await ready.json(),{ready:true,mode:'live',chargesEnabled:true});
+  h.env.__accountId='acct_wrong';
+  const wrong=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(wrong.status,503);
+  assert.equal((await wrong.json()).error,'jbh_stripe_account_mismatch');
+  assert.equal(h.calls.some(c=>c.path==='checkout/sessions'),false);
+});
+
+test('health fails closed on missing approved catalog and shipping contract',async()=>{
+  const h=jbhEnv({JBH_CATALOG:'{}'});
+  const empty=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(empty.status,503);
+  assert.equal((await empty.json()).error,'jbh_catalog_unavailable');
+  h.env.JBH_CATALOG=JSON.stringify(CATALOG);
+  h.env.JBH_SHIPPING='{}';
+  const shipping=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(shipping.status,503);
+  assert.equal((await shipping.json()).error,'jbh_shipping_invalid');
+  assert.equal(h.calls.length,0);
+});
+
 test('the hair lane is off unless JBH_ORDERS_ENABLED is true',async()=>{
   const h=jbhEnv({JBH_ORDERS_ENABLED:'false'});
   const r=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
