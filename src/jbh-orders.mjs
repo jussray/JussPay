@@ -60,6 +60,7 @@ async function jbhAccount(env,forPurchase){
   const a=await jbhStripe(env,'account');
   if(a.id!==(jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID))fail(503,'jbh_stripe_account_mismatch');
   if(forPurchase&&(!a.charges_enabled||!a.details_submitted))fail(503,'jbh_stripe_account_not_ready');
+  return a;
 }
 
 // Constant-time comparison through equal-length digests.
@@ -128,6 +129,16 @@ export async function handleJbh(request,env){
       if(!JBH_EVENTS.has(event.type))return json({received:true,ignored:true});
       await jbhAccount(env,false);
       return toBook(env,'/event',{event});
+    }
+    if(path==='/jbh/health'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      jbhReady(env);
+      if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
+      if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+      jbhCatalog(env);
+      jbhShipping(env);
+      const account=await jbhAccount(env,true);
+      return json({ready:true,mode:jbhLive(env)?'live':'sandbox',accountId:account.id,chargesEnabled:account.charges_enabled===true});
     }
     if(path==='/jbh/checkout'||path.startsWith('/jbh/orders/')){
       jbhReady(env);

@@ -443,3 +443,21 @@ test('live refund enters hold without automatic vendor dispatch',async()=>{
   assert.equal(await orderStatus(h,orderId),'refunded');
   assert.equal((await queue(h))[0].status,'hold');
 });
+
+
+test('live readiness health proves Beauty Co without creating a checkout session',async()=>{
+  const h=liveEnv();
+  const r=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(r.status,200);
+  assert.deepEqual(await r.json(),{ready:true,mode:'live',accountId:JBH_LIVE_ACCOUNT,chargesEnabled:true});
+  assert.equal(h.calls.filter(c=>c.path==='account').length,1);
+  assert.equal(h.calls.some(c=>c.path==='checkout/sessions'),false);
+});
+
+test('live readiness health fails closed before provider calls when live approval is off',async()=>{
+  const h=liveEnv({JBH_LIVE_CHARGES_APPROVED:'false'});
+  const r=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(r.status,503);
+  assert.equal((await r.json()).error,'jbh_live_not_approved');
+  assert.equal(h.calls.length,0);
+});
