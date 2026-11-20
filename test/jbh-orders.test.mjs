@@ -466,6 +466,31 @@ test('owner-only vendor adapter view contains no supplier credentials or public 
   assert.equal(JSON.stringify(response).includes('sk_test_'),false);
 });
 
+test('owner can inspect vendor adapters with charging disabled and no Stripe configuration',async()=>{
+  const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_STRIPE_SECRET_KEY:undefined,JBH_STRIPE_WEBHOOK_SECRET:undefined});
+  h.env.JBH_ORDERS=undefined;
+  const anonymous=await worker.fetch(get('/jbh/vendor-adapters'),h.env);
+  assert.equal(anonymous.status,401);
+  const wrong=await worker.fetch(get('/jbh/vendor-adapters',{'x-jbh-owner-key':'not-the-owner'}),h.env);
+  assert.equal(wrong.status,401);
+  const authorized=await worker.fetch(get('/jbh/vendor-adapters',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(authorized.status,200);
+  const result=await authorized.json();
+  assert.equal(result.ordersEnabled,false);
+  assert.equal(result.dispatchEnabled,false);
+  assert.equal(result.adapters.faire.kind,'wholesale-stock');
+  assert.equal(h.calls.length,0,'inspection must never contact Stripe');
+  const checkout=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+  assert.equal(checkout.status,503,'readiness inspection must not enable charges');
+});
+
+test('vendor adapter inspection refuses absent owner secret even if payment is disabled',async()=>{
+  const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_OWNER_KEY:undefined});
+  const response=await worker.fetch(get('/jbh/vendor-adapters',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(response.status,401);
+  assert.equal(h.calls.length,0);
+});
+
 test('live vendor authority fails closed before contacting Stripe on unverified channels, unsupported suppliers and Faire dropshipping',async()=>{
   const sku='BRAZ-SEW-BW-10-12-14';
   const item={sku,vendor:'dropship-beauty'};
