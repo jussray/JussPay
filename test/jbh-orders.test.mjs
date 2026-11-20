@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/worker.mjs';
 import {JbhOrderBook,priceOrder,reconcileSession,JBH_LIVE_ACCOUNT} from '../src/jbh-orders.mjs';
+import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from '../src/jbh-vendor-adapters.mjs';
 import {memoryStorage} from './harness.mjs';
 
 const STOREFRONT_KEY='sf_'+'a'.repeat(40);
@@ -60,8 +61,9 @@ async function signed(event,secret=WEBHOOK_SECRET){
 }
 const completed=(id,sessionId,extra={})=>({id,livemode:false,type:'checkout.session.completed',data:{object:{id:sessionId,...extra}}});
 
-async function paidOrder(h,items=[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1},{sku:'JBH-BS-14',quantity:2}]){
-  const r=await worker.fetch(post('/jbh/checkout',{items},sf),h.env);
+async function paidOrder(h,items){
+  const selected=items || (h.env.JBH_STRIPE_LIVE==='true'?[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1}]:[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1},{sku:'JBH-BS-14',quantity:2}]);
+  const r=await worker.fetch(post('/jbh/checkout',{items:selected},sf),h.env);
   assert.equal(r.status,200);
   const {orderId}=await r.json();
   const sessionId=[...h.sessions.keys()].at(-1);
@@ -421,7 +423,68 @@ test('signed refund hold is forwarded and replay does not duplicate a delivered 
 // Live-mode behavior is tested only with fake provider responses. No real Stripe calls.
 const liveEnv=(overrides={})=>jbhEnv({
   JBH_STRIPE_LIVE:'true',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE',
-  JBH_LIVE_CHARGES_APPROVED:'true',...overrides
+  JBH_LIVE_CHARGES_APPROVED:'true',
+  // Fake receipts exist only in the test provider harness, never production.
+  JBH_VENDOR_SALES_AUTHORITY:JSON.stringify({
+    'dropship-beauty':{enabled:true,mode:'verified-owner-handoff',
+      evidenceRef:'test:inventory:receipt-12345678',ownerReceiptRef:'test:handoff:receipt-12345678',
+      ownerHandoffVerified:true,verifiedAt:Date.now(),
+      skus:['BRAZ-SEW-BW-10-12-14','BRAZ-TRANS-CLO-DW-12']}
+  }),
+  ...overrides
+});
+
+
+
+test('vendor adapters distinguish Faire stocked inventory, Dropship Beauty handoff, DSers and manual procurement',()=>{
+  const adapters=jbhVendorAdapters();
+  assert.equal(adapters['faire'].handoff,'owner-warehouse-fulfillment');
+  assert.equal(adapters['faire'].autoDispatch,false);
+  assert.equal(adapters['dropship-beauty'].handoff,'dropship-beauty-shopify-app');
+  assert.equal(adapters['dsers'].handoff,'dsers-connected-channel-or-csv');
+  assert.equal(adapters['manual-procurement'].handoff,'owner-fulfillment');
+  const plans=vendorOwnerPlan({'faire':[{sku:'FAIRE-01',quantity:2}],
+    'dropship-beauty':[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1}],
+    'supplier-unknown':[{sku:'ACME-01',quantity:1}]});
+  assert.equal(plans[0].action,'owner_review');
+  assert.equal(plans[0].autoDispatch,false);
+  assert.match(plans[0].note,/never dropship/);
+  assert.equal(plans[2].action,'quarantine');
+});
+
+test('owner-only vendor adapter view contains no supplier credentials or public dispatch action',async()=>{
+  const h=jbhEnv();
+  const unauth=await worker.fetch(get('/jbh/vendor-adapters'),h.env);
+  assert.equal(unauth.status,401);
+  const allowed=await worker.fetch(get('/jbh/vendor-adapters',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(allowed.status,200);
+  const response=await allowed.json();
+  assert.equal(response.dispatchEnabled,false);
+  assert.equal(response.adapters.faire.kind,'wholesale-stock');
+  assert.equal(response.adapters.dsers.autoDispatch,false);
+  assert.equal(JSON.stringify(response).includes('sk_test_'),false);
+});
+
+test('live vendor authority fails closed before contacting Stripe on unverified channels, unsupported suppliers and Faire dropshipping',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const item={sku,vendor:'dropship-beauty'};
+  assert.throws(()=>liveVendorAuthority({},[item]),{message:'jbh_vendor_authority_required'});
+  const h=liveEnv({JBH_VENDOR_SALES_AUTHORITY:'{}'});
+  const unauthorized=await worker.fetch(post('/jbh/checkout',{items:[{sku,quantity:1}]},sf),h.env);
+  assert.equal(unauthorized.status,503);
+  assert.equal((await unauthorized.json()).error,'jbh_vendor_not_verified');
+  assert.equal(h.calls.length,0,'unverified supplier must be stopped before Stripe');
+
+  const manual=liveEnv();
+  const restricted=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),manual.env);
+  assert.equal((await restricted.json()).error,'jbh_vendor_not_verified');
+  assert.equal(manual.calls.length,0);
+  const faire=liveEnv();
+  const stocked={enabled:true,mode:'stocked-on-hand',evidenceRef:'test:faire:receipt-12345678',
+    verifiedAt:Date.now(),skus:['FAIRE-01']};
+  faire.env.JBH_VENDOR_SALES_AUTHORITY=JSON.stringify({'faire':stocked});
+  assert.throws(()=>liveVendorAuthority(faire.env,[{sku:'FAIRE-01',vendor:'faire'}]),{message:'jbh_local_stock_reservation_required'});
+  assert.throws(()=>liveVendorAuthority(faire.env,[{sku:'NEW-01',vendor:'unverified-supplier'}]),{message:'jbh_vendor_unsupported'});
 });
 
 test('live checkout is disabled independently until the founder approval switch is set',async()=>{
@@ -433,7 +496,7 @@ test('live checkout is disabled independently until the founder approval switch 
 
 test('live Stripe key must authenticate as Beauty Co before any session is created',async()=>{
   const h=liveEnv();h.env.__accountId='acct_wrong_merchant';
-  const r=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+  const r=await worker.fetch(post('/jbh/checkout',{items:[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1}]},sf),h.env);
   assert.equal(r.status,503);assert.equal((await r.json()).error,'jbh_stripe_account_mismatch');
   assert.equal(h.calls.some(c=>c.path==='checkout/sessions'),false);
 });
