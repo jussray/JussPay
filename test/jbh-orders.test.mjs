@@ -71,6 +71,55 @@ async function paidOrder(h,items=[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1},{sku:'
   return {orderId,sessionId};
 }
 
+test('read-only merchant proof works with orders disabled and the live charge switch off',async()=>{
+  const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_LIVE_CHARGES_APPROVED:'false',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE'});
+  h.env.__accountId=JBH_LIVE_ACCOUNT;
+  for(const headers of [{},{'x-jbh-storefront-key':'wrong'}]){
+    const denied=await worker.fetch(get('/jbh/merchant-proof',headers),h.env);
+    assert.equal(denied.status,401);
+    assert.equal((await denied.json()).error,'storefront_key_required');
+  }
+  const wrongMethod=await worker.fetch(post('/jbh/merchant-proof',{},sf),h.env);
+  assert.equal(wrongMethod.status,405);
+  assert.equal(h.calls.length,0);
+  const proof=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(proof.status,200);
+  assert.deepEqual(await proof.json(),{
+    merchantVerified:true,providerChargesEnabled:true,providerDetailsSubmitted:true,
+    ordersEnabled:false,liveChargesApproved:false
+  });
+  assert.deepEqual(h.calls.map(x=>[x.path,x.method]),[['account','GET']]);
+  assert.equal(h.calls[0].headers.authorization,'Bearer sk_live_FAKE');
+  assert.equal(h.calls.some(x=>x.path.startsWith('checkout/')),false);
+});
+
+test('merchant proof fails closed on wrong mode, merchant, provider failure and enabled charge gates',async()=>{
+  const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_LIVE_CHARGES_APPROVED:'false',JBH_STRIPE_SECRET_KEY:'sk_test_FAKE'});
+  const wrongMode=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(wrongMode.status,503);
+  assert.equal((await wrongMode.json()).error,'jbh_live_key_required');
+  assert.equal(h.calls.length,0);
+  h.env.JBH_STRIPE_SECRET_KEY='sk_live_FAKE';
+  h.env.__accountId='acct_wrong';
+  const wrongMerchant=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(wrongMerchant.status,503);
+  assert.equal((await wrongMerchant.json()).error,'jbh_stripe_account_mismatch');
+  h.env.__accountId=JBH_LIVE_ACCOUNT;
+  h.env.STRIPE_FETCH=async()=>new Response('{}',{status:401});
+  const rejected=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(rejected.status,502);
+  assert.equal((await rejected.json()).error,'stripe_unavailable');
+  h.env.JBH_LIVE_CHARGES_APPROVED='true';
+  const approved=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(approved.status,503);
+  assert.equal((await approved.json()).error,'jbh_merchant_proof_requires_hold');
+  h.env.JBH_LIVE_CHARGES_APPROVED='false';
+  h.env.JBH_ORDERS_ENABLED='true';
+  const enabled=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(enabled.status,503);
+  assert.equal((await enabled.json()).error,'jbh_merchant_proof_requires_hold');
+});
+
 test('health requires a matching storefront secret and never opens a payment session',async()=>{
   const h=jbhEnv();
   const unauthorized=await worker.fetch(get('/jbh/health'),h.env);
