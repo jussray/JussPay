@@ -15,6 +15,22 @@ Cloudflare Worker billing foundation for Juss&Co. **Not live or activated.** The
 
 No ambient-cookie authentication or browser CORS is provided. Product servers call JussPay using a visitor-scoped Bearer token. `AUTH` must be a **private service binding** implementing `POST https://auth.internal/verify`, validating that token against the actual app/session identity, and returning `{ "subject": "stable-global-user-id", "audience": "jusspay", "expiresAt": 1234567890 }`. The subject must be globally unique across all five apps. Tokens must expire and the auth service must deny inappropriate issuers, audiences, revoked sessions and tenants. Never forward an unverified `x-user-id` header or founder credentials.
 
+## JBH hair-order lane (sandbox by default; gated live code)
+
+**Vendor-specific runtime:** `src/jbh-vendor-adapters.mjs` models Dropship Beauty
+(app-based handoff), Faire (received wholesale inventory only), DSers
+(verified channel/CSV handoff), and manual suppliers. An owner-only
+`GET /jbh/vendor-adapters` shows the adapter types. The paid-order
+`GET /jbh/fulfillment` queue includes vendor-specific work plans.
+No code automatically purchases, contacts, or dispatches to suppliers.
+
+In live mode `JBH_VENDOR_SALES_AUTHORITY` must contain fresh, explicit
+per-SKU fulfillment evidence before Stripe is called. Faire and unreserved
+manual stock remain blocked until an atomic stock-reservation runtime exists.
+An owner-authored receipt alone is not proof of a working external integration.
+The three existing payment activation switches remain independent and default
+OFF. Never set them from this document alone.
+
 ## JBH hair-order lane (sandbox only)
 
 Separate from the five-app subscription core (founder ruling 2026-11-17). Physical hair and beauty orders for jussbeautifulhair.com, sold by the **Juss Ray Beauty Co** Stripe account (`acct_1TfbELRp7J40bCrl`). Code: `src/jbh-orders.mjs`; tests: `test/jbh-orders.test.mjs`.
