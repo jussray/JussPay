@@ -162,10 +162,11 @@ export async function handleJbh(request,env){
       return toBook(env,'/order',{id});
     }
     if(path==='/jbh/vendor-adapters'){
-      jbhReady(env,true);
+      // Owner readback is deliberately independent of payment activation.
+      // A missing or invalid owner key still denies access before any data returns.
       await requireOwner(request,env);
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
-      return json({adapters:jbhVendorAdapters(),dispatchEnabled:false});
+      return json({adapters:jbhVendorAdapters(),dispatchEnabled:false,ordersEnabled:env.JBH_ORDERS_ENABLED==='true'});
     }
     if(path==='/jbh/fulfillment'||path.startsWith('/jbh/fulfillment/')){
       jbhReady(env,true);
