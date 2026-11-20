@@ -92,7 +92,8 @@ test('health requires a matching storefront secret and never opens a payment ses
 });
 
 test('health refuses live checkout without approval and the exact Beauty Co account',async()=>{
-  const h=jbhEnv({JBH_STRIPE_LIVE:'true',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE'});
+  const h=liveEnv({JBH_LIVE_CHARGES_APPROVED:'false',
+    JBH_CATALOG:JSON.stringify({'BRAZ-SEW-BW-10-12-14':CATALOG['BRAZ-SEW-BW-10-12-14']})});
   const held=await worker.fetch(get('/jbh/health',sf),h.env);
   assert.equal(held.status,503);
   assert.equal((await held.json()).error,'jbh_live_not_approved');
