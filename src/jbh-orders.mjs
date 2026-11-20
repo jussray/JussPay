@@ -118,6 +118,27 @@ async function requireOwner(request,env){
 export async function handleJbh(request,env){
   const path=new URL(request.url).pathname;
   try{
+    // Read-only live merchant proof. Operates only while checkout and charges are held.
+    // Authenticated callers see a bounded result, never the Stripe key or account payload.
+    if(path==='/jbh/merchant-proof'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      if(env.JBH_ORDERS_ENABLED!=='false'||env.JBH_LIVE_CHARGES_APPROVED!=='false')fail(503,'jbh_merchant_proof_requires_hold');
+      if(!env.JBH_STOREFRONT_KEY||env.JBH_STOREFRONT_KEY.length<32||!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
+      if(!/^(sk|rk)_live_/.test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,'jbh_live_key_required');
+      // GET /v1/account needs no Stripe-Version override. The checkout API's
+      // pinned version remains independently required and is not inferred here.
+      let response;
+      try{
+        response=await (env.STRIPE_FETCH||fetch)('https://api.stripe.com/v1/account',{
+          method:'GET',headers:{authorization:`Bearer ${env.JBH_STRIPE_SECRET_KEY}`},
+          redirect:'error',signal:AbortSignal.timeout(8000)
+        });
+      }catch{fail(502,'stripe_unavailable');}
+      if(!response.ok)fail(502,'stripe_unavailable');
+      let account;try{account=await response.json();}catch{fail(502,'stripe_unavailable');}
+      if(account?.id!==JBH_LIVE_ACCOUNT)fail(503,'jbh_stripe_account_mismatch');
+      return json({merchantVerified:true,providerChargesEnabled:account.charges_enabled===true,providerDetailsSubmitted:account.details_submitted===true,ordersEnabled:false,liveChargesApproved:false});
+    }
     if(path==='/jbh/webhook'){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
       jbhReady(env,true);
