@@ -12,5 +12,5 @@
     {"tag": "v1", "new_sqlite_classes": ["BillingAccount"]},
     {"tag": "v2", "new_sqlite_classes": ["JbhOrderBook"]}
   ],
-  "vars": {"STRIPE_LIVE": "false", "APPROVED_PLANS": "{}", "JBH_ORDERS_ENABLED": "false", "JBH_STRIPE_LIVE": "false"}
+  "vars": {"STRIPE_LIVE": "false", "APPROVED_PLANS": "{}", "INTRODUCTORY_OFFERS_ENABLED": "false", "JBH_ORDERS_ENABLED": "false", "JBH_STRIPE_LIVE": "false"}
 }
