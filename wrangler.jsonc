@@ -4,13 +4,43 @@
   "compatibility_date": "2026-11-05",
   "workers_dev": false,
   "preview_urls": false,
-  "durable_objects": {"bindings": [
-    {"name": "BILLING", "class_name": "BillingAccount"},
-    {"name": "JBH_ORDERS", "class_name": "JbhOrderBook"}
-  ]},
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BILLING",
+        "class_name": "BillingAccount"
+      },
+      {
+        "name": "JBH_ORDERS",
+        "class_name": "JbhOrderBook"
+      }
+    ]
+  },
   "migrations": [
-    {"tag": "v1", "new_sqlite_classes": ["BillingAccount"]},
-    {"tag": "v2", "new_sqlite_classes": ["JbhOrderBook"]}
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "BillingAccount"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "JbhOrderBook"
+      ]
+    }
   ],
-  "vars": {"STRIPE_LIVE": "false", "APPROVED_PLANS": "{}", "INTRODUCTORY_OFFERS_ENABLED": "false", "JBH_ORDERS_ENABLED": "false", "JBH_STRIPE_LIVE": "false"}
+  "vars": {
+    "STRIPE_LIVE": "false",
+    "APPROVED_PLANS": "{}",
+    "INTRODUCTORY_OFFERS_ENABLED": "false",
+    "JBH_ORDERS_ENABLED": "false",
+    "JBH_STRIPE_LIVE": "false"
+  },
+  "services": [
+    {
+      "binding": "AUTH",
+      "service": "jusspay-auth"
+    }
+  ]
 }

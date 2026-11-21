@@ -1,6 +1,7 @@
 import test, {after} from 'node:test';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {readFileSync} from 'node:fs';
 import auth from '../src/auth-supabase.mjs';
 import worker from '../src/worker.mjs';
 import {combinedEnv} from './harness.mjs';
@@ -127,4 +128,17 @@ test('real JussPay /entitlements uses Google AUTH subject and denies a stolen us
   const foreign=await worker.fetch(new Request('https://jusspay.test/entitlements',{
     headers:{authorization:'Bearer '+await googleToken({aud:'different-client'})}}),env);
   assert.equal(foreign.status,401);
+});
+
+test('Wrangler declares private JussPay AUTH without enabling public billing',()=>{
+  const worker=JSON.parse(readFileSync(new URL('../wrangler.jsonc',import.meta.url),'utf8'));
+  const authWorker=JSON.parse(readFileSync(new URL('../wrangler.auth.jsonc',import.meta.url),'utf8'));
+  assert(worker.services.some(b=>b.binding==='AUTH'&&b.service==='jusspay-auth'));
+  assert.equal(worker.workers_dev,false);
+  assert.equal(worker.vars.STRIPE_LIVE,'false');
+  assert.equal(worker.vars.INTRODUCTORY_OFFERS_ENABLED,'false');
+  assert.equal(worker.vars.PAYMENTS_ENABLED,undefined);
+  assert.equal(authWorker.workers_dev,false);
+  assert.equal(authWorker.preview_urls,false);
+  assert.equal(authWorker.vars.PROMPTOS_GOOGLE_CLIENT_ID,clientId);
 });
