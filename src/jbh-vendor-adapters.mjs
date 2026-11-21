@@ -60,13 +60,14 @@ export function liveVendorAuthority(env,items,now=Date.now()){
       !Array.isArray(entry.skus)||!entry.skus.includes(sku)||
       entry.skus.some(s=>typeof s!=='string'||!SKU.test(s)))fail(503,'jbh_vendor_not_verified');
 
-    // A wholesale Faire purchase is not customer dropshipping. No stock
-    // reservation runtime exists in this release, so never charge for it.
-    if(vendor==='faire'||vendor==='manual-procurement'){
-      fail(503,'jbh_local_stock_reservation_required');
+    // Faire still has no approved on-hand stock reservation workflow.
+    if(vendor==='faire')fail(503,'jbh_local_stock_reservation_required');
+    // A manual vendor receipt is not itself inventory; the JbhOrderBook
+    // separately reserves physically recorded stock before Stripe Checkout.
+    if(vendor==='manual-procurement' &&
+      (entry.stockReceived!==true||entry.ownerShippingVerified!==true)){
+      fail(503,'jbh_vendor_handoff_not_verified');
     }
-    // Dropship Beauty uses a Shopify app, and DSers a configured channel/CSV
-    // workflow. No native API is inferred from their brand names.
     if(entry.ownerHandoffVerified!==true||
       typeof entry.ownerReceiptRef!=='string'||!RECEIPT.test(entry.ownerReceiptRef)){
       fail(503,'jbh_vendor_handoff_not_verified');

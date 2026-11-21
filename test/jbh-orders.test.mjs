@@ -580,3 +580,55 @@ test('live refund enters hold without automatic vendor dispatch',async()=>{
   assert.equal(await orderStatus(h,orderId),'refunded');
   assert.equal((await queue(h))[0].status,'hold');
 });
+
+const stockedManual=()=>liveEnv({
+  JBH_CATALOG:JSON.stringify({'JBH-BS-14':CATALOG['JBH-BS-14']}),
+  JBH_VENDOR_SALES_AUTHORITY:JSON.stringify({'manual-procurement':{
+    enabled:true,mode:'owner-stocked',stockReceived:true,ownerShippingVerified:true,
+    ownerHandoffVerified:true,ownerReceiptRef:'test:handoff:physical-12345',
+    evidenceRef:'test:inventory:physical-12345',verifiedAt:Date.now(),skus:['JBH-BS-14']
+  }})
+});
+
+test('owner-stock receipts reserve physical units before Stripe, rejecting oversells and duplicate receipts',async()=>{
+  const h=stockedManual();
+  const absent=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+  assert.equal(absent.status,409);
+  assert.equal((await absent.json()).error,'jbh_stock_unavailable');
+  assert.equal(h.calls.some(c=>c.path==='checkout/sessions'),false);
+  assert.equal((await worker.fetch(get('/jbh/inventory',sf),h.env)).status,401);
+  const payload={sku:'JBH-BS-14',quantity:1,receiptRef:'test:stock:physical-12345',verifiedAt:Date.now()};
+  const put=()=>worker.fetch(post('/jbh/inventory/receive',payload,{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  const first=await put();assert.equal(first.status,200);assert.equal((await first.json()).available,1);
+  const repeat=await put();assert.equal(repeat.status,200);assert.equal((await repeat.json()).idempotent,true);
+  const reuse=await worker.fetch(post('/jbh/inventory/receive',{...payload,quantity:2},{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(reuse.status,409);
+  assert.equal((await worker.fetch(get('/jbh/health',sf),h.env)).status,200);
+  const requestId=crypto.randomUUID(),body={requestId,items:[{sku:'JBH-BS-14',quantity:1}]};
+  const sale=await worker.fetch(post('/jbh/checkout',body,sf),h.env);assert.equal(sale.status,200);
+  const original=await sale.json();assert.match(original.url,/cs_live_/);
+  const retry=await worker.fetch(post('/jbh/checkout',body,sf),h.env);assert.equal((await retry.json()).url,original.url);
+  const second=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+  assert.equal(second.status,409);assert.equal((await second.json()).error,'jbh_stock_unavailable');
+  assert.equal(h.sessions.size,1);
+  const stock=await worker.fetch(get('/jbh/inventory',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal((await stock.json()).stock[0].available,0);
+  assert.equal((await worker.fetch(get('/jbh/health',sf),h.env)).status,503);
+});
+
+test('invalid or unauthorized stock receipts cannot increase available inventory',async()=>{
+  const h=stockedManual(),good={sku:'JBH-BS-14',quantity:1,receiptRef:'test:stock:physical-54321',verifiedAt:Date.now()};
+  for(const input of [{...good,quantity:0},{...good,quantity:101},{...good,verifiedAt:Date.now()-9*24*60*60*1000},{...good,receiptRef:'x'},{...good,sku:'UNAPPROVED-01'}]){
+    const r=await worker.fetch(post('/jbh/inventory/receive',input,{'x-jbh-owner-key':OWNER_KEY}),h.env);
+    assert.ok([400,409].includes(r.status));
+  }
+  const stock=await worker.fetch(get('/jbh/inventory',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.deepEqual((await stock.json()).stock,[]);
+});
+
+test('stocked-owner vendor still requires verified shipping handoff authority',()=>{
+  const h=stockedManual(),rows=JSON.parse(h.env.JBH_VENDOR_SALES_AUTHORITY);
+  rows['manual-procurement'].ownerShippingVerified=false;
+  h.env.JBH_VENDOR_SALES_AUTHORITY=JSON.stringify(rows);
+  assert.throws(()=>liveVendorAuthority(h.env,[{sku:'JBH-BS-14',vendor:'manual-procurement'}]),{message:'jbh_vendor_handoff_not_verified'});
+});

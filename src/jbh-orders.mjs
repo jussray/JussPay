@@ -138,7 +138,12 @@ export async function handleJbh(request,env){
       if(live&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
       if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
       jbhShipping(env);
-      if(live)liveVendorAuthority(env,Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor})));
+      if(live){
+        const items=Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor}));
+        liveVendorAuthority(env,items);
+        const inventory=await toBook(env,'/inventory-ready',{items});
+        if(!inventory.ok)fail(503,'jbh_inventory_unavailable');
+      }
       await jbhAccount(env,true);
       return json({ready:true,mode:live?'live':'sandbox',chargesEnabled:true});
     }
@@ -160,6 +165,26 @@ export async function handleJbh(request,env){
       const id=path.slice('/jbh/orders/'.length);
       if(!ORDER_ID.test(id))fail(404,'not_found');
       return toBook(env,'/order',{id});
+    }
+    if(path==='/jbh/inventory'||path==='/jbh/inventory/receive'){
+      await requireOwner(request,env);
+      if(!env.JBH_ORDERS)fail(503,'jbh_orders_unavailable');
+      jbhLive(env);
+      if(path==='/jbh/inventory'){
+        if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+        return toBook(env,'/inventory',{});
+      }
+      if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+      const input=await jsonBody(request,2048),now=Date.now();
+      if(Object.keys(input).sort().join(',')!=='quantity,receiptRef,sku,verifiedAt'||
+        typeof input.sku!=='string'||!/^[A-Z0-9][A-Z0-9-]{1,63}$/.test(input.sku)||
+        !Number.isSafeInteger(input.quantity)||input.quantity<1||input.quantity>100||
+        typeof input.receiptRef!=='string'||!/^[A-Za-z0-9][A-Za-z0-9:_./-]{7,199}$/.test(input.receiptRef)||
+        !Number.isSafeInteger(input.verifiedAt)||input.verifiedAt>now||
+        now-input.verifiedAt>7*24*60*60*1000)fail(400,'jbh_inventory_receipt_invalid');
+      const product=jbhCatalog(env)[input.sku];
+      if(!product||product.vendor!=='manual-procurement')fail(409,'jbh_stock_sku_not_approved');
+      return toBook(env,'/inventory-receive',input);
     }
     if(path==='/jbh/vendor-adapters'){
       // Owner readback is deliberately independent of payment activation.
@@ -194,6 +219,9 @@ export class JbhOrderBook{
   fetch(request){const run=this.tail.then(()=>this.handle(request));this.tail=run.catch(()=>{});return run;}
   async handle(request){try{
     const path=new URL(request.url).pathname;const input=await request.json();
+    if(path==='/inventory')return json({stock:[...(await this.state.storage.list({prefix:'stock:'})).values()]});
+    if(path==='/inventory-receive')return await this.receiveInventory(input);
+    if(path==='/inventory-ready')return await this.inventoryReady(input.items);
     if(path==='/checkout')return await this.checkout(input.requestId,input.priced);
     if(path==='/order'){const o=await this.state.storage.get(`order:${input.id}`);return o?json(publicOrder(o)):json({error:'not_found'},404);}
     if(path==='/fulfillment'){
@@ -204,6 +232,38 @@ export class JbhOrderBook{
     if(path==='/event')return await this.event(input.event);
     return json({error:'not_found'},404);
   }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}}
+
+  async receiveInventory(input){
+    const storage=this.state.storage,receiptKey='stock-receipt:'+input.receiptRef;
+    let duplicate=false,stock;
+    await storage.transaction(async txn=>{
+      const receipt=await txn.get(receiptKey);
+      if(receipt){
+        if(receipt.sku!==input.sku||receipt.quantity!==input.quantity||
+          receipt.verifiedAt!==input.verifiedAt)fail(409,'jbh_inventory_receipt_reused');
+        duplicate=true;
+        stock=await txn.get('stock:'+input.sku);
+        return;
+      }
+      const key='stock:'+input.sku,old=await txn.get(key)||{sku:input.sku,available:0,received:0};
+      if(!Number.isSafeInteger(old.available)||old.available<0||
+        old.available+input.quantity>1000)fail(409,'jbh_inventory_limit');
+      stock={...old,available:old.available+input.quantity,received:old.received+input.quantity};
+      await txn.put(key,stock);
+      await txn.put(receiptKey,{sku:input.sku,quantity:input.quantity,verifiedAt:input.verifiedAt});
+    });
+    return json({sku:input.sku,available:stock.available,received:stock.received,idempotent:duplicate});
+  }
+
+  async inventoryReady(items){
+    for(const item of items||[]){
+      if(item.vendor!=='manual-procurement')continue;
+      const stock=await this.state.storage.get('stock:'+item.sku);
+      if(!stock||!Number.isSafeInteger(stock.available)||stock.available<1)
+        fail(503,'jbh_stock_unavailable');
+    }
+    return json({ready:true});
+  }
 
   async checkout(requestId,priced){
     const env=this.env,storage=this.state.storage;
@@ -220,8 +280,21 @@ export class JbhOrderBook{
       order={id,status:'pending',...priced,fingerprint,createdAt:Date.now(),sessionId:null,sessionUrl:null,paymentIntent:null};
       // The order and request mapping exist before the provider side effect, so a retry
       // reuses the same Stripe idempotency key and an unknown outcome stays reconcilable.
-      await storage.put(`order:${id}`,order);
-      await storage.put(`request:${requestId}`,id);
+      // Reserve owner stock and persist idempotency atomically before Stripe.
+      // Unknown payment outcomes keep the stock reserved until reconciled.
+      const stocked=jbhLive(env)?priced.items.filter(x=>x.vendor==='manual-procurement'):[];
+      await storage.transaction(async txn=>{
+        const updates=[];
+        for(const item of stocked){
+          const key='stock:'+item.sku,stock=await txn.get(key);
+          if(!stock||!Number.isSafeInteger(stock.available)||
+            stock.available<item.quantity)fail(409,'jbh_stock_unavailable');
+          updates.push([key,{...stock,available:stock.available-item.quantity}]);
+        }
+        for(const [key,stock] of updates)await txn.put(key,stock);
+        await txn.put(`order:${id}`,order);
+        await txn.put(`request:${requestId}`,id);
+      });
     }
     const origin=env.JBH_STOREFRONT_ORIGIN;
     const form={mode:'payment',client_reference_id:id,'metadata[jbh_order_id]':id,'payment_intent_data[metadata][jbh_order_id]':id,
