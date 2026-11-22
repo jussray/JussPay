@@ -580,3 +580,24 @@ test('live refund enters hold without automatic vendor dispatch',async()=>{
   assert.equal(await orderStatus(h,orderId),'refunded');
   assert.equal((await queue(h))[0].status,'hold');
 });
+
+test('live readiness checks approved vendor handoff before contacting Stripe',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({
+    JBH_VENDOR_SALES_AUTHORITY:'{}',
+    JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})
+  });
+  const r=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(r.status,503);
+  assert.equal((await r.json()).error,'jbh_vendor_not_verified');
+  assert.equal(h.calls.length,0,'health must not call Stripe when vendor handoff is unverified');
+});
+
+test('live readiness confirms the Beauty Co account without creating a Checkout Session',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})});
+  const r=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(r.status,200);
+  assert.deepEqual(await r.json(),{ready:true,mode:'live',chargesEnabled:true});
+  assert.deepEqual(h.calls.map(c=>c.path),['account']);
+});

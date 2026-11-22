@@ -50,3 +50,29 @@ test('production deployment config preserves the live webhook path without autho
   assert.match(productionConfig, /"STRIPE_LIVE":\s*"false"/);
   assert.match(productionConfig, /"APPROVED_PLANS":\s*"\{\}"/);
 });
+
+test('JussPay production Worker Previews are isolated and incapable of taking real payments', () => {
+  const runtime = JSON.parse(productionConfig);
+  const preview = runtime.previews;
+  assert.ok(preview, 'Wrangler preview requires its own configuration');
+  for (const key of [
+    'STRIPE_LIVE', 'PAYMENTS_ENABLED', 'SUBSCRIPTIONS_TEST_ENABLED',
+    'JBH_ORDERS_ENABLED', 'JBH_STRIPE_LIVE',
+    'JBH_LIVE_CHARGES_APPROVED', 'JBH_PRIVATE_RECEIPTS_ENABLED'
+  ]) {
+    assert.equal(preview.vars[key], 'false', key + ' must stay off in branch previews');
+  }
+  assert.equal(preview.vars.APPROVED_PLANS, '{}');
+  assert.equal(preview.vars.JBH_STOREFRONT_ORIGIN, 'https://preview.invalid');
+  assert.equal(preview.vars.RELEASE_SHA, 'preview-not-production');
+  assert.ok(!Object.hasOwn(preview, 'services'),
+    'Preview service bindings could call production; do not bind AUTH here');
+  assert.deepEqual(preview.durable_objects.bindings, [
+    { name: 'BILLING', class_name: 'BillingAccount' },
+    { name: 'JBH_ORDERS', class_name: 'JbhOrderBook' },
+  ]);
+  assert.ok(preview.durable_objects.bindings.every(b => !Object.hasOwn(b, 'script_name')));
+  assert.equal(runtime.vars.JBH_STRIPE_LIVE, 'true',
+    'Production config must be preserved unchanged');
+  assert.equal(runtime.vars.JBH_LIVE_CHARGES_APPROVED, 'false');
+});
