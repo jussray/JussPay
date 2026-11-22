@@ -38,3 +38,15 @@ test('preview Durable Objects are bound to isolated sandbox namespaces', () => {
   assert.ok(previewBlock.includes('"name":"BILLING"'));
   assert.ok(previewBlock.includes('"name":"JBH_ORDERS"'));
 });
+
+const productionConfig = await readFile(new URL('../wrangler.jsonc', import.meta.url), 'utf8');
+
+test('production deployment config preserves the live webhook path without authorizing live checkout', () => {
+  assert.match(productionConfig, /"binding":\s*"AUTH"\s*,\s*"service":\s*"jusspay-auth"/);
+  assert.match(productionConfig, /"JBH_ORDERS_ENABLED":\s*"true"/);
+  assert.match(productionConfig, /"JBH_STRIPE_LIVE":\s*"true"/);
+  assert.match(productionConfig, /"JBH_LIVE_CHARGES_APPROVED":\s*"false"/);
+  assert.match(productionConfig, /"JBH_STOREFRONT_ORIGIN":\s*"https:\/\/jussbeautifulhair\.com"/);
+  assert.match(productionConfig, /"STRIPE_LIVE":\s*"false"/);
+  assert.match(productionConfig, /"APPROVED_PLANS":\s*"\{\}"/);
+});
