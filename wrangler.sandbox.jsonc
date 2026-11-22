@@ -19,8 +19,15 @@
     "vars": {
       "STRIPE_LIVE": "false",
       "APPROVED_PLANS": "{}",
+      "PAYMENTS_ENABLED": "false",
       "JBH_ORDERS_ENABLED": "false",
       "JBH_STRIPE_LIVE": "false"
+    },
+    "durable_objects": {
+      "bindings": [
+        {"name":"BILLING","class_name":"BillingAccount"},
+        {"name":"JBH_ORDERS","class_name":"JbhOrderBook"}
+      ]
     }
   },
   "vars": {
