@@ -9,6 +9,7 @@
 // written to the owner's fulfillment queue grouped by vendor with status
 // awaiting_owner_dispatch. Nothing here contacts, pays or orders from a vendor.
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
+import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from './jbh-vendor-adapters.mjs';
 
 // Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
 // account ID and never shares the live order book.
@@ -60,7 +61,6 @@ async function jbhAccount(env,forPurchase){
   const a=await jbhStripe(env,'account');
   if(a.id!==(jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID))fail(503,'jbh_stripe_account_mismatch');
   if(forPurchase&&(!a.charges_enabled||!a.details_submitted))fail(503,'jbh_stripe_account_not_ready');
-  return a;
 }
 
 // Constant-time comparison through equal-length digests.
@@ -134,11 +134,13 @@ export async function handleJbh(request,env){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
       jbhReady(env);
       if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
-      if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
-      jbhCatalog(env);
+      const live=jbhLive(env);
+      if(live&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+      if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
       jbhShipping(env);
-      const account=await jbhAccount(env,true);
-      return json({ready:true,mode:jbhLive(env)?'live':'sandbox',accountId:account.id,chargesEnabled:account.charges_enabled===true});
+      if(live)liveVendorAuthority(env,Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor})));
+      await jbhAccount(env,true);
+      return json({ready:true,mode:live?'live':'sandbox',chargesEnabled:true});
     }
     if(path==='/jbh/checkout'||path.startsWith('/jbh/orders/')){
       jbhReady(env);
@@ -150,6 +152,7 @@ export async function handleJbh(request,env){
         // The storefront sends one requestId per shopper attempt and reuses it on retry.
         if(!REQUEST_ID.test(input.requestId||''))fail(400,'request_id_required');
         const priced=priceOrder(env,input);
+        if(jbhLive(env))liveVendorAuthority(env,priced.items);
         await jbhAccount(env,true);
         return toBook(env,'/checkout',{requestId:input.requestId,priced});
       }
@@ -157,6 +160,13 @@ export async function handleJbh(request,env){
       const id=path.slice('/jbh/orders/'.length);
       if(!ORDER_ID.test(id))fail(404,'not_found');
       return toBook(env,'/order',{id});
+    }
+    if(path==='/jbh/vendor-adapters'){
+      // Owner readback is deliberately independent of payment activation.
+      // A missing or invalid owner key still denies access before any data returns.
+      await requireOwner(request,env);
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      return json({adapters:jbhVendorAdapters(),dispatchEnabled:false,ordersEnabled:env.JBH_ORDERS_ENABLED==='true'});
     }
     if(path==='/jbh/fulfillment'||path.startsWith('/jbh/fulfillment/')){
       jbhReady(env,true);
@@ -188,7 +198,7 @@ export class JbhOrderBook{
     if(path==='/order'){const o=await this.state.storage.get(`order:${input.id}`);return o?json(publicOrder(o)):json({error:'not_found'},404);}
     if(path==='/fulfillment'){
       const rows=[];for(const id of (await this.state.storage.list({prefix:'queue:'})).values()){const f=await this.state.storage.get(`fulfillment:${id}`);if(f)rows.push(f);}
-      return json({queue:rows});
+      return json({queue:rows.map(f=>({...f,vendorPlans:vendorOwnerPlan(f.vendors)}))});
     }
     if(path==='/dispatched')return await this.dispatched(input.id,input.note);
     if(path==='/event')return await this.event(input.event);
