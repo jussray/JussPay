@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const config = await readFile(new URL('../wrangler.sandbox.jsonc', import.meta.url), 'utf8');
-const previewSection = config.split('"previews"')[1]?.split('"vars"')[1]?.split('"durable_objects"')[0] ?? '';
 const previewVars = config.split('"previews"')[1]?.split('"durable_objects"')[0] ?? '';
 const productionVars = config.split('"vars"').at(-1) ?? '';
 
