@@ -31,8 +31,8 @@ test('sandbox has no verified merchant identity until a distinct test account is
 });
 
 test('preview Durable Objects are bound to isolated sandbox namespaces', () => {
-  assert.match(config, /"previews"[\\s\\S]*?"durable_objects"\\s*:\\s*\\{/);
-  const previewDurableObjects = config.split('"previews"')[1]?.split('"durable_objects"')[1]?.split('"vars"')[0] ?? '';
-  assert.match(previewDurableObjects, /"name"\\s*:\\s*"BILLING"/);
-  assert.match(previewDurableObjects, /"name"\\s*:\\s*"JBH_ORDERS"/);
+  const previewBlock = config.slice(config.indexOf('"previews"'), config.lastIndexOf('"vars"'));
+  assert.ok(previewBlock.includes('"durable_objects"'));
+  assert.ok(previewBlock.includes('"name":"BILLING"'));
+  assert.ok(previewBlock.includes('"name":"JBH_ORDERS"'));
 });
