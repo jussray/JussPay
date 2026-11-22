@@ -23,7 +23,7 @@ test('sandbox preview cannot enable payment or live checkout', () => {
   }
 });
 
-test('sandbox has no verified merchant identity until a distinct test account is approved', () => {
+test('sandbox pins the verified Beauty Co identity while retaining test-only mode', () => {
   assert.match(previewVars, /"JBH_TEST_ACCOUNT_ID"\s*:\s*""/);
   assert.doesNotMatch(config, /acct_[A-Za-z0-9]+/);
   assert.match(productionVars, /"JBH_ORDERS_ENABLED"\s*:\s*"false"/);
