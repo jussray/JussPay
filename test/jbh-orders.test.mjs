@@ -77,7 +77,7 @@ test('read-only merchant proof works with orders disabled and the live charge sw
   for(const headers of [{},{'x-jbh-storefront-key':'wrong'}]){
     const denied=await worker.fetch(get('/jbh/merchant-proof',headers),h.env);
     assert.equal(denied.status,401);
-    assert.equal((await denied.json()).error,'storefront_key_required');
+    assert.equal((await denied.json()).error,'merchant_proof_credential_required');
   }
   const wrongMethod=await worker.fetch(post('/jbh/merchant-proof',{},sf),h.env);
   assert.equal(wrongMethod.status,405);
@@ -137,7 +137,7 @@ test('health requires a matching storefront secret and never opens a payment ses
   const h=jbhEnv();
   const unauthorized=await worker.fetch(get('/jbh/health'),h.env);
   assert.equal(unauthorized.status,401);
-  assert.equal((await unauthorized.json()).error,'storefront_key_required');
+  assert.equal((await unauthorized.json()).error,'merchant_proof_credential_required');
   assert.equal(h.calls.length,0);
   const ready=await worker.fetch(get('/jbh/health',sf),h.env);
   assert.equal(ready.status,200);
