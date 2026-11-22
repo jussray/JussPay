@@ -22,7 +22,8 @@
       "APPROVED_PLANS": "{}",
       "PAYMENTS_ENABLED": "false",
       "JBH_ORDERS_ENABLED": "false",
-      "JBH_STRIPE_LIVE": "false"
+      "JBH_STRIPE_LIVE": "false",
+      "JBH_TEST_ACCOUNT_ID": ""
     },
     "durable_objects": {
       "bindings": [
