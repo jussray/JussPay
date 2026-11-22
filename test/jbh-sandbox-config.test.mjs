@@ -4,7 +4,7 @@ import test from 'node:test';
 
 const config = await readFile(new URL('../wrangler.sandbox.jsonc', import.meta.url), 'utf8');
 const previewVars = config.split('"previews"')[1]?.split('"durable_objects"')[0] ?? '';
-const productionVars = config.split('"vars"').at(-1) ?? '';
+const runtimeVars = config.split('"vars"').at(-1) ?? '';
 
 test('JussPay sandbox Worker is not publicly routable', () => {
   assert.match(config, /^\s*"name":\s*"jusspay-jbh-sandbox"/m);
@@ -23,11 +23,13 @@ test('sandbox preview cannot enable payment or live checkout', () => {
   }
 });
 
-test('sandbox pins the verified Beauty Co identity while retaining test-only mode', () => {
-  assert.match(previewVars, /"JBH_TEST_ACCOUNT_ID"\s*:\s*""/);
-  assert.doesNotMatch(config, /acct_[A-Za-z0-9]+/);
-  assert.match(productionVars, /"JBH_ORDERS_ENABLED"\s*:\s*"false"/);
-  assert.match(productionVars, /"JBH_STRIPE_LIVE"\s*:\s*"false"/);
+test('sandbox pins the verified Beauty Co account identity in test mode only', () => {
+  const account = '"JBH_TEST_ACCOUNT_ID": "acct_1TfbELRp7J40bCrl"';
+  assert.ok(previewVars.includes(account));
+  assert.ok(runtimeVars.includes(account));
+  assert.doesNotMatch(config, /sk_(?:test|live)_/);
+  assert.match(runtimeVars, /"JBH_ORDERS_ENABLED"\s*:\s*"false"/);
+  assert.match(runtimeVars, /"JBH_STRIPE_LIVE"\s*:\s*"false"/);
 });
 
 test('preview Durable Objects are bound to isolated sandbox namespaces', () => {
