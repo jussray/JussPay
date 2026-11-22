@@ -269,6 +269,7 @@ export class JbhOrderBook{
     const env=this.env,storage=this.state.storage;
     if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
     const fingerprint=await digest(JSON.stringify([priced.items.map(x=>[x.sku,x.quantity,x.unitAmount]),priced.shipping,priced.total]));
+    const stocked=jbhLive(env)?priced.items.filter(x=>x.vendor==='manual-procurement'):[];
     let id=await storage.get(`request:${requestId}`);
     let order=id?await storage.get(`order:${id}`):null;
     if(order){
@@ -277,12 +278,12 @@ export class JbhOrderBook{
       if(order.sessionUrl)return json({orderId:order.id,url:order.sessionUrl});
     }else{
       id=`jbho_${crypto.randomUUID()}`;
-      order={id,status:'pending',...priced,fingerprint,createdAt:Date.now(),sessionId:null,sessionUrl:null,paymentIntent:null};
+      order={id,status:'pending',...priced,fingerprint,createdAt:Date.now(),sessionId:null,sessionUrl:null,paymentIntent:null,
+        stockReserved:stocked.map(({sku,quantity})=>({sku,quantity}))};
       // The order and request mapping exist before the provider side effect, so a retry
       // reuses the same Stripe idempotency key and an unknown outcome stays reconcilable.
       // Reserve owner stock and persist idempotency atomically before Stripe.
       // Unknown payment outcomes keep the stock reserved until reconciled.
-      const stocked=jbhLive(env)?priced.items.filter(x=>x.vendor==='manual-procurement'):[];
       await storage.transaction(async txn=>{
         const updates=[];
         for(const item of stocked){
@@ -411,7 +412,7 @@ export class JbhOrderBook{
     const order=await storage.get(`order:${orderId}`);
     if(!order)fail(409,'order_missing');
 
-    let next=null,fulfillment=null,reason=null,queue=null;
+    let next=null,fulfillment=null,reason=null,queue=null,stockRestore=[];
     if(event.type.startsWith('checkout.session.')){
       await jbhAccount(this.env,false);
       const session=await jbhStripe(this.env,`checkout/sessions/${encodeURIComponent(order.sessionId)}`);
@@ -430,14 +431,19 @@ export class JbhOrderBook{
             await storage.put(`event:${event.id}`,{type:event.type,mismatch:true,processedAt:Date.now()});
             return json({received:true,reconciliation_required:true});
           }
-          next={...order,status:'paid',paidAt:Date.now(),paymentIntent:paidPi};
+          next={...order,status:'paid',paidAt:Date.now(),paymentIntent:paidPi,stockReserved:[]};
           const byVendor={};for(const x of order.items)(byVendor[x.vendor]||=[]).push({sku:x.sku,name:x.name,quantity:x.quantity});
           fulfillment={orderId,status:'awaiting_owner_dispatch',vendors:byVendor,shipTo:{name:ship.name||null,address:ship.address,phone:session.customer_details?.phone||null},email:session.customer_details?.email||null,shippingSpeed:order.shippingSpeed,createdAt:Date.now()};
           queue='add';
         }
         // A refunded or disputed order stays held: a paid event never re-opens it.
-      }else if(event.type==='checkout.session.async_payment_failed'&&order.status==='pending')next={...order,status:'payment_failed'};
-      else if(event.type==='checkout.session.expired'&&order.status==='pending')next={...order,status:'expired'};
+      }else if(event.type==='checkout.session.async_payment_failed'&&order.status==='pending'){
+        stockRestore=Array.isArray(order.stockReserved)?order.stockReserved:[];
+        next={...order,status:'payment_failed',stockReserved:[],stockReservationReleased:stockRestore.length>0};
+      }else if(event.type==='checkout.session.expired'&&order.status==='pending'){
+        stockRestore=Array.isArray(order.stockReserved)?order.stockReserved:[];
+        next={...order,status:'expired',stockReserved:[],stockReservationReleased:stockRestore.length>0};
+      }
     }else{
       // Any refund or dispute holds dispatch for owner review, in any order state.
       // A dispute outranks a refund; a partial refund is recorded as such.
@@ -450,6 +456,12 @@ export class JbhOrderBook{
 
     await storage.transaction(async txn=>{
       if(await txn.get(`event:${event.id}`))return;
+      for(const item of stockRestore){
+        const key=`stock:${item.sku}`,stock=await txn.get(key);
+        if(!stock||!Number.isSafeInteger(stock.available)||!Number.isSafeInteger(item.quantity)||
+          item.quantity<1||stock.available+item.quantity>1000)fail(409,'jbh_stock_restore_conflict');
+        await txn.put(key,{...stock,available:stock.available+item.quantity});
+      }
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
       if(next && ['refunded','partially_refunded','disputed'].includes(next.status)){
