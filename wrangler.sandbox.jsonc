@@ -1,5 +1,6 @@
 {
   // Isolated JBH checkout test Worker. NOT a production release configuration.
+  // Keep disabled until a distinct Stripe test-account ID is verified.
   "name": "jusspay-jbh-sandbox",
   "main": "src/worker.mjs",
   "compatibility_date": "2026-11-05",
@@ -35,7 +36,6 @@
     "PAYMENTS_ENABLED": "false",
     "APPROVED_PLANS": "{}",
     "JBH_STRIPE_LIVE": "false",
-    "JBH_ORDERS_ENABLED": "false",
-    "JBH_TEST_ACCOUNT_ID": "acct_1TfbELRp7J40bCrl"
+    "JBH_ORDERS_ENABLED": "false"
   }
 }
