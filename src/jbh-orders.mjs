@@ -123,7 +123,9 @@ export async function handleJbh(request,env){
     if(path==='/jbh/merchant-proof'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
       if(env.JBH_ORDERS_ENABLED!=='false'||env.JBH_LIVE_CHARGES_APPROVED!=='false')fail(503,'jbh_merchant_proof_requires_hold');
-      if(!env.JBH_STOREFRONT_KEY||env.JBH_STOREFRONT_KEY.length<32||!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
+      const storefrontAuthorized=!!env.JBH_STOREFRONT_KEY&&env.JBH_STOREFRONT_KEY.length>=32&&await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY);
+      const operatorAuthorized=!!env.JBH_MERCHANT_PROOF_KEY&&env.JBH_MERCHANT_PROOF_KEY.length>=32&&await sameSecret(request.headers.get('x-jbh-merchant-proof-key'),env.JBH_MERCHANT_PROOF_KEY);
+      if(!storefrontAuthorized&&!operatorAuthorized)fail(401,'merchant_proof_credential_required');
       if(!/^(sk|rk)_live_/.test(env.JBH_STRIPE_SECRET_KEY||''))fail(503,'jbh_live_key_required');
       // GET /v1/account needs no Stripe-Version override. The checkout API's
       // pinned version remains independently required and is not inferred here.
