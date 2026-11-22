@@ -616,6 +616,34 @@ test('owner-stock receipts reserve physical units before Stripe, rejecting overs
   assert.equal((await worker.fetch(get('/jbh/health',sf),h.env)).status,503);
 });
 
+test('failed and expired live checkout sessions release reserved owner stock exactly once',async()=>{
+  for(const terminal of [
+    {type:'checkout.session.async_payment_failed',id:'evt_stock_failed',expected:'payment_failed'},
+    {type:'checkout.session.expired',id:'evt_stock_expired',expected:'expired'}
+  ]){
+    const h=stockedManual();
+    const receipt={sku:'JBH-BS-14',quantity:1,receiptRef:'test:stock:release-12345',verifiedAt:Date.now()};
+    const received=await worker.fetch(post('/jbh/inventory/receive',receipt,{'x-jbh-owner-key':OWNER_KEY}),h.env);
+    assert.equal(received.status,200);
+    const checkout=await worker.fetch(post('/jbh/checkout',{items:[{sku:'JBH-BS-14',quantity:1}]},sf),h.env);
+    assert.equal(checkout.status,200);
+    const {orderId}=await checkout.json();
+    const sessionId=[...h.sessions.keys()].at(-1);
+    const event={id:terminal.id,livemode:true,type:terminal.type,data:{object:{id:sessionId}}};
+    const processed=await worker.fetch(await signed(event),h.env);
+    assert.equal(processed.status,200);
+    assert.equal(await orderStatus(h,orderId),terminal.expected);
+    const stock=await worker.fetch(get('/jbh/inventory',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+    assert.equal((await stock.json()).stock[0].available,1);
+    const duplicate=await worker.fetch(await signed(event),h.env);
+    assert.equal((await duplicate.json()).duplicate,true);
+    const alternate={...event,id:terminal.id+'_late',type:terminal.type==='checkout.session.expired'?'checkout.session.async_payment_failed':'checkout.session.expired'};
+    await worker.fetch(await signed(alternate),h.env);
+    const unchanged=await worker.fetch(get('/jbh/inventory',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+    assert.equal((await unchanged.json()).stock[0].available,1);
+  }
+});
+
 test('invalid or unauthorized stock receipts cannot increase available inventory',async()=>{
   const h=stockedManual(),good={sku:'JBH-BS-14',quantity:1,receiptRef:'test:stock:physical-54321',verifiedAt:Date.now()};
   for(const input of [{...good,quantity:0},{...good,quantity:101},{...good,verifiedAt:Date.now()-9*24*60*60*1000},{...good,receiptRef:'x'},{...good,sku:'UNAPPROVED-01'}]){
