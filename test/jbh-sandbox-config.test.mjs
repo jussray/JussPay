@@ -76,3 +76,13 @@ test('JussPay production Worker Previews are isolated and incapable of taking re
     'Production config must be preserved unchanged');
   assert.equal(runtime.vars.JBH_LIVE_CHARGES_APPROVED, 'false');
 });
+
+test('production may call only the existing private receipt Worker through a service binding', () => {
+  const runtime = JSON.parse(productionConfig);
+  assert.deepEqual(runtime.services.find(s => s.binding === 'JBH_PRIVATE_WORKER'),
+    { binding: 'JBH_PRIVATE_WORKER', service: 'jbh-private-payment-control' });
+  assert.ok(!Object.hasOwn(runtime.previews, 'services'),
+    'Preview must never connect to a production private Worker');
+  assert.equal(runtime.vars.JBH_LIVE_CHARGES_APPROVED, 'false');
+  assert.equal(runtime.previews.vars.JBH_PRIVATE_RECEIPTS_ENABLED, 'false');
+});

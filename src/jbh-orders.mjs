@@ -171,6 +171,48 @@ export async function handleJbh(request,env){
       if(!ORDER_ID.test(id))fail(404,'not_found');
       return toBook(env,'/order',{id});
     }
+    if(path==='/jbh/launch-readiness'){
+      // Owner-only, no-provider-call preflight. Configuration evidence is not
+      // proof of merchant, inventory, or payment readiness.
+      await requireOwner(request,env);
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      let catalog=null,shippingConfigured=false,vendorEvidenceContractValid=false;
+      try{
+        const parsed=jbhCatalog(env);
+        if(Object.keys(parsed).length>0)catalog=parsed;
+      }catch{}
+      try{jbhShipping(env);shippingConfigured=true;}catch{}
+      if(catalog){
+        try{
+          liveVendorAuthority(env,Object.entries(catalog).map(([sku,p])=>({sku,vendor:p.vendor})));
+          vendorEvidenceContractValid=true;
+        }catch{}
+      }
+      let validOrigin=false;
+      try{
+        const origin=new URL(env.JBH_STOREFRONT_ORIGIN);
+        validOrigin=origin.protocol==='https:'&&origin.origin===env.JBH_STOREFRONT_ORIGIN;
+      }catch{}
+      const checks={
+        liveStripeMode:env.JBH_STRIPE_LIVE==='true',
+        orderBookBound:typeof env.JBH_ORDERS?.get==='function'&&typeof env.JBH_ORDERS?.idFromName==='function',
+        ordersEnabled:env.JBH_ORDERS_ENABLED==='true',
+        liveStripeKeyConfigured:/^(?:sk|rk)_live_/.test(env.JBH_STRIPE_SECRET_KEY||''),
+        webhookSecretConfigured:typeof env.JBH_STRIPE_WEBHOOK_SECRET==='string'&&env.JBH_STRIPE_WEBHOOK_SECRET.length>0,
+        storefrontKeyConfigured:typeof env.JBH_STOREFRONT_KEY==='string'&&env.JBH_STOREFRONT_KEY.length>=32,
+        storefrontOriginConfigured:validOrigin,
+        approvedCatalogConfigured:catalog!==null,
+        shippingConfigured,
+        vendorEvidenceContractValid,
+      };
+      return json({
+        readOnly:true,
+        configurationComplete:Object.values(checks).every(Boolean),
+        founderChargesApproved:env.JBH_LIVE_CHARGES_APPROVED==='true',
+        providerVerified:false,
+        checks
+      });
+    }
     if(path==='/jbh/vendor-adapters'){
       // Owner readback is deliberately independent of payment activation.
       // A missing or invalid owner key still denies access before any data returns.

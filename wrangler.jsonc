@@ -8,6 +8,10 @@
     {
       "binding": "AUTH",
       "service": "jusspay-auth"
+    },
+    {
+      "binding": "JBH_PRIVATE_WORKER",
+      "service": "jbh-private-payment-control"
     }
   ],
   "durable_objects": {

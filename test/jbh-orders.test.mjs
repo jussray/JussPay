@@ -613,3 +613,43 @@ test('live checkout and health refuse an inaccessible owner fulfillment queue be
   assert.equal((await checkout.json()).error,'jbh_owner_queue_unavailable');
   assert.equal(h.calls.length,0,'no Stripe calls without owner fulfillment access');
 });
+
+test('owner launch preflight reports configuration without opening a payment session',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({JBH_LIVE_CHARGES_APPROVED:'false',JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})});
+  const r=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(r.status,200);
+  const body=await r.json();
+  assert.equal(body.readOnly,true);
+  assert.equal(body.configurationComplete,true);
+  assert.equal(body.founderChargesApproved,false);
+  assert.equal(body.providerVerified,false);
+  assert.equal(body.checks.vendorEvidenceContractValid,true);
+  assert.equal(h.calls.length,0,'read-only preflight must never call Stripe');
+});
+
+test('owner launch preflight is private, GET-only and fail-closed',async()=>{
+  const h=liveEnv();
+  const denied=await worker.fetch(get('/jbh/launch-readiness'),h.env);
+  assert.equal(denied.status,401);
+  const wrong=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':'wrong'}),h.env);
+  assert.equal(wrong.status,401);
+  const method=await worker.fetch(post('/jbh/launch-readiness',{}, {'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(method.status,405);
+  assert.equal(h.calls.length,0);
+});
+
+test('owner launch preflight identifies missing vendor proof and catalog without provider calls',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]}),JBH_VENDOR_SALES_AUTHORITY:'{}'});
+  const bad=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(bad.status,200);
+  const missingVendor=await bad.json();
+  assert.equal(missingVendor.configurationComplete,false);
+  assert.equal(missingVendor.checks.vendorEvidenceContractValid,false);
+  h.env.JBH_CATALOG='{}';
+  const empty=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(empty.status,200);
+  assert.equal((await empty.json()).checks.approvedCatalogConfigured,false);
+  assert.equal(h.calls.length,0);
+});
