@@ -137,7 +137,7 @@ test('health requires a matching storefront secret and never opens a payment ses
   const h=jbhEnv();
   const unauthorized=await worker.fetch(get('/jbh/health'),h.env);
   assert.equal(unauthorized.status,401);
-  assert.equal((await unauthorized.json()).error,'merchant_proof_credential_required');
+  assert.equal((await unauthorized.json()).error,'storefront_key_required');
   assert.equal(h.calls.length,0);
   const ready=await worker.fetch(get('/jbh/health',sf),h.env);
   assert.equal(ready.status,200);
