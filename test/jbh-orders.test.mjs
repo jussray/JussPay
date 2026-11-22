@@ -93,6 +93,19 @@ test('read-only merchant proof works with orders disabled and the live charge sw
   assert.equal(h.calls.some(x=>x.path.startsWith('checkout/')),false);
 });
 
+test('merchant proof accepts the isolated operator credential without changing storefront authentication',async()=>{
+  const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_LIVE_CHARGES_APPROVED:'false',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE',JBH_MERCHANT_PROOF_KEY:'op_'+'c'.repeat(48)});
+  h.env.__accountId=JBH_LIVE_ACCOUNT;
+  const denied=await worker.fetch(get('/jbh/merchant-proof',{'x-jbh-merchant-proof-key':'wrong'}),h.env);
+  assert.equal(denied.status,401);
+  const accepted=await worker.fetch(get('/jbh/merchant-proof',{'x-jbh-merchant-proof-key':h.env.JBH_MERCHANT_PROOF_KEY}),h.env);
+  assert.equal(accepted.status,200);
+  assert.equal((await accepted.json()).merchantVerified,true);
+  const storefront=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
+  assert.equal(storefront.status,200);
+  assert.equal(h.calls.length,2);
+});
+
 test('merchant proof fails closed on wrong mode, merchant, provider failure and enabled charge gates',async()=>{
   const h=jbhEnv({JBH_ORDERS_ENABLED:'false',JBH_LIVE_CHARGES_APPROVED:'false',JBH_STRIPE_SECRET_KEY:'sk_test_FAKE'});
   const wrongMode=await worker.fetch(get('/jbh/merchant-proof',sf),h.env);
