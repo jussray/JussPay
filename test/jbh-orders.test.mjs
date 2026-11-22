@@ -580,3 +580,15 @@ test('live refund enters hold without automatic vendor dispatch',async()=>{
   assert.equal(await orderStatus(h,orderId),'refunded');
   assert.equal((await queue(h))[0].status,'hold');
 });
+
+
+test('live checkout and health refuse an inaccessible owner fulfillment queue before Stripe',async()=>{
+  const h=liveEnv({JBH_OWNER_KEY:undefined});
+  const health=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(health.status,503);
+  assert.equal((await health.json()).error,'jbh_owner_queue_unavailable');
+  const checkout=await worker.fetch(post('/jbh/checkout',{items:[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1}]},sf),h.env);
+  assert.equal(checkout.status,503);
+  assert.equal((await checkout.json()).error,'jbh_owner_queue_unavailable');
+  assert.equal(h.calls.length,0,'no Stripe calls without owner fulfillment access');
+});
