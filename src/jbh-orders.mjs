@@ -111,6 +111,14 @@ async function jsonBody(request,limit){
 const book=env=>env.JBH_ORDERS.get(env.JBH_ORDERS.idFromName(`${jbhLive(env)?'live':'test'}:jbh-orders`));
 const toBook=(env,path,body)=>book(env).fetch(new Request(`https://jbh-orders.internal${path}`,{method:'POST',body:JSON.stringify(body)}));
 
+function requireLiveOwnerQueue(env){
+  // Never charge a live customer if nobody can securely retrieve their paid order.
+  // Existing webhook processing and customer order readback must remain available
+  // if the owner credential is accidentally removed after checkout.
+  if(jbhLive(env)&&(typeof env.JBH_OWNER_KEY!=='string'||env.JBH_OWNER_KEY.length<32))
+    fail(503,'jbh_owner_queue_unavailable');
+}
+
 async function requireOwner(request,env){
   if(!env.JBH_OWNER_KEY||env.JBH_OWNER_KEY.length<32||!await sameSecret(request.headers.get('x-jbh-owner-key'),env.JBH_OWNER_KEY))fail(401,'owner_key_required');
 }
@@ -136,6 +144,7 @@ export async function handleJbh(request,env){
       if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
       const live=jbhLive(env);
       if(live&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+      requireLiveOwnerQueue(env);
       if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
       jbhShipping(env);
       if(live)liveVendorAuthority(env,Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor})));
@@ -148,6 +157,7 @@ export async function handleJbh(request,env){
       if(path==='/jbh/checkout'){
         if(request.method!=='POST')return json({error:'method_not_allowed'},405);
         if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+        requireLiveOwnerQueue(env);
         const input=await jsonBody(request,4096);
         // The storefront sends one requestId per shopper attempt and reuses it on retry.
         if(!REQUEST_ID.test(input.requestId||''))fail(400,'request_id_required');
