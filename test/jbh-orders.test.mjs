@@ -559,17 +559,23 @@ test('revoking checkout approval does not drop webhooks for previously created l
   assert.equal((await blocked.json()).error,'jbh_live_not_approved');
 });
 
-test('live paid orders never forward PII to the sandbox-only private receipt worker',async()=>{
-  let delivered=0;
+test('live paid orders forward a signed live-only receipt to the isolated private endpoint',async()=>{
+  const delivered=[];
   const h=liveEnv({
     JBH_PRIVATE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
-    JBH_PRIVATE_WORKER:{async fetch(){delivered++;return Response.json({});}}
+    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);return Response.json({received:true});}}
   });
   const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed({...completed('evt_live_private',sessionId),livemode:true}),h.env);
   assert.deepEqual(await r.json(),{received:true});
   assert.equal(await orderStatus(h,orderId),'paid');
-  assert.equal(delivered,0);
+  assert.equal(delivered.length,1);
+  assert.equal(new URL(delivered[0].url).pathname,'/internal/jusspay/live/paid-receipt');
+  const payload=await delivered[0].json();
+  assert.equal(payload.livemode,true);
+  assert.equal(payload.orderId,orderId);
+  assert.equal(payload.state,'awaiting_owner_dispatch');
+  assert.equal(delivered[0].headers.get('x-jbh-jusspay-signature').length,64);
 });
 
 test('live refund enters hold without automatic vendor dispatch',async()=>{
