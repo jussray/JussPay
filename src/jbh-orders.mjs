@@ -126,6 +126,8 @@ async function requireOwner(request,env){
 // Public entry for /jbh/* paths.
 export async function handleJbh(request,env){
   const path=new URL(request.url).pathname;
+  let webhookContext=null;
+  const webhookStartedAt=path==='/jbh/webhook'?Date.now():0;
   try{
     if(path==='/jbh/webhook'){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
@@ -133,10 +135,16 @@ export async function handleJbh(request,env){
       const raw=await boundedText(request,262144);
       if(!await verifySignature(raw,request.headers.get('stripe-signature'),env.JBH_STRIPE_WEBHOOK_SECRET))fail(400,'invalid_signature');
       let event;try{event=JSON.parse(raw);}catch{fail(400,'invalid_event');}
+      webhookContext={eventId:event?.id,eventType:event?.type,livemode:event?.livemode};
       if(!/^evt_/.test(event.id||'')||event.livemode!==jbhLive(env)||(event.account&&event.account!==(jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID)))fail(400,'wrong_event_context');
-      if(!JBH_EVENTS.has(event.type))return json({received:true,ignored:true});
+      if(!JBH_EVENTS.has(event.type)){
+        console.info('[JBH_STRIPE_WEBHOOK] ignored',{...webhookContext,reason:'unsupported_event'});
+        return json({received:true,ignored:true});
+      }
       await jbhAccount(env,false);
-      return toBook(env,'/event',{event});
+      const response=await toBook(env,'/event',{event});
+      console.info('[JBH_STRIPE_WEBHOOK] processed',{...webhookContext,status:response.status,elapsedMs:Date.now()-webhookStartedAt});
+      return response;
     }
     if(path==='/jbh/health'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
@@ -235,7 +243,13 @@ export async function handleJbh(request,env){
       return toBook(env,'/dispatched',{id:m[1],note:input.note||null});
     }
     return json({error:'not_found'},404);
-  }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}
+  }catch(e){
+    if(path==='/jbh/webhook')console.warn('[JBH_STRIPE_WEBHOOK] rejected',{
+      ...(webhookContext||{}),status:e.status||500,
+      error:e.status?'request_rejected':'processing_error'
+    });
+    return json({error:e.status?e.message:'internal_error'},e.status||500);
+  }
 }
 
 // One serialized order book per mode. Storage keys: order:<id>, request:<requestId>,
