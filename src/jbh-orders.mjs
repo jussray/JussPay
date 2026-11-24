@@ -10,6 +10,7 @@
 // awaiting_owner_dispatch. Nothing here contacts, pays or orders from a vendor.
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
 import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from './jbh-vendor-adapters.mjs';
+import {jbhConfigurationReview} from './jbh-preflight.mjs';
 
 // Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
 // account ID and never shares the live order book.
@@ -145,6 +146,15 @@ export async function handleJbh(request,env){
       const response=await toBook(env,'/event',{event});
       console.info('[JBH_STRIPE_WEBHOOK] processed',{...webhookContext,status:response.status,elapsedMs:Date.now()-webhookStartedAt});
       return response;
+    }
+    if(path==='/jbh/preflight'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      await requireOwner(request,env);
+      const result=jbhConfigurationReview(env,{
+        ready:()=>jbhReady(env),catalog:()=>jbhCatalog(env),shipping:()=>jbhShipping(env),
+        owner:()=>requireLiveOwnerQueue(env),authority:items=>liveVendorAuthority(env,items)
+      });
+      return json(result,result.configurationValid?200:503);
     }
     if(path==='/jbh/health'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
