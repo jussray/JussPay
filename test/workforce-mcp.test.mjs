@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {handleDemoMcp} from '../src/workforce-mcp.mjs';
+const ctx={access:{role:'payroll_admin'},list:()=>[{name:'demo',inputSchema:{type:'object'}}],call:(_access,name,args)=>{if(name!=='demo'||Object.keys(args).length)throw Object.assign(new Error('private detail'),{status:400});return {mode:'synthetic_preview',submittable:false};}};
+const req=(method,params={},id=1)=>({jsonrpc:'2.0',id,method,params});
+test('initialization negotiates only the supported legacy revision',()=>{assert.equal(handleDemoMcp(req('initialize',{protocolVersion:'2025-11-25'}),ctx).result.protocolVersion,'2025-11-25');assert.equal(handleDemoMcp(req('initialize',{protocolVersion:'unknown'}),ctx).result.protocolVersion,'2025-11-25');});
+test('tools require authority on every invocation',()=>{assert.equal(handleDemoMcp(req('tools/list'),{...ctx,access:null}).error.code,-32001);assert.equal(handleDemoMcp(req('tools/call',{name:'demo'}),{...ctx,access:null}).error.code,-32001);});
+test('lists permitted tools and returns structured synthetic results',()=>{assert.deepEqual(handleDemoMcp(req('tools/list'),ctx).result.tools,ctx.list());const r=handleDemoMcp(req('tools/call',{name:'demo',arguments:{}}),ctx).result;assert.equal(r.structuredContent.submittable,false);assert.equal(JSON.parse(r.content[0].text).mode,'synthetic_preview');});
+test('denies unknown tools, invalid arguments and does not leak exceptions',()=>{for(const params of [{name:'submit_payroll'},{name:'demo',arguments:{companyId:'other'}},{name:'demo',arguments:[]}]){const r=handleDemoMcp(req('tools/call',params),ctx);assert.ok(r.error||r.result.isError);assert.equal(JSON.stringify(r).includes('private detail'),false);}});
+test('rejects malformed messages and ignores valid notifications without running tools',()=>{assert.equal(handleDemoMcp([],ctx).error.code,-32600);assert.equal(handleDemoMcp(req('unknown'),ctx).error.code,-32601);let called=false;assert.equal(handleDemoMcp({jsonrpc:'2.0',method:'tools/call',params:{name:'demo'}},{...ctx,call:()=>{called=true;}}),null);assert.equal(called,false);});
