@@ -1,3 +1,4 @@
+import {handleDemoMcp} from './workforce-mcp.mjs';
 import {authorizeWorkspace,demoWorkspace,demoPayroll,workspaceToolDefinitions,callWorkspaceTool} from './workforce-workspace.mjs';
 // Synthetic weekly examples only. No worker records, provider calls or payments.
 const fields=['regularMinutes','overtimeMinutes','hourlyCents'];
@@ -34,6 +35,14 @@ export async function handleWorkforce(request,env,{identity,boundedText,json}){
       if(path==='/workforce/workspace')return json(demoWorkspace(access));
       if(path.endsWith('/payroll'))return json(demoPayroll(access));
       return json({tools:workspaceToolDefinitions(access)});
+    }
+    if(path==='/workforce/workspace/mcp-demo'){
+      if(env.WORKFORCE_MCP_DEMO_ENABLED!=='true')return json({error:'mcp_demo_disabled'},503);
+      if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+      const raw=await boundedText(request,4096);
+      let data;try{data=JSON.parse(raw);}catch{return json({jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}},400);}
+      const result=handleDemoMcp(data,{access,list:workspaceToolDefinitions,call:callWorkspaceTool});
+      return result===null?new Response(null,{status:202,headers:{'cache-control':'no-store'}}):json(result);
     }
     if(path==='/workforce/workspace/tools/call'){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
