@@ -18,3 +18,6 @@ Use the existing verified visitor-scoped JussPay bearer identity. Set WORKFORCE_
 6. Run focused and full repository tests, staging browser checks, provider demo reconciliation and tenant-isolation tests before any production review. This branch alone is not proof of production readiness.
 
 References: https://docs.gusto.com/embedded-payroll/docs/getting-started and https://embedded.gusto.com/product/payroll-api.
+
+## Private MCP demonstration
+The additional POST /workforce/workspace/mcp-demo route is disabled unless both workforce preview and MCP demo flags are explicitly enabled. It uses the existing verified identity and WORKFORCE_ACCESS role lookup on every request. It implements a limited 2025-11-25 JSON-RPC message adapter for initialize, ping, tools/list and tools/call; this is not a full Streamable HTTP implementation, OAuth resource server, or registered ChatGPT plugin. No real payroll data or submission is exposed. Use the official MCP SDK and OpenAI OAuth guidance for a production transport; verify current protocol compatibility, consent, metadata discovery, token scope/audience, origin checks, and deployment before registration. See https://developers.openai.com/plugins/build/auth and https://developers.openai.com/plugins/build/mcp-server.
