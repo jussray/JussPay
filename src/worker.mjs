@@ -1,3 +1,4 @@
+import {handleWorkforce} from './workforce.mjs';
 import {createTestOrder,planEntitlement,orderStatus,checkoutTestSubscription,checkoutOneTimeOrder,orderWebhook,validatePurchase,testKey} from './subscriptions.mjs';
 import {handleJbh,JbhOrderBook} from './jbh-orders.mjs';
 export {validatePurchase,JbhOrderBook};
@@ -86,6 +87,7 @@ export default {async fetch(request,env){try{
   }
   // JBH hair orders: own gate, keys, account and Durable Object (src/jbh-orders.mjs).
   if(url.pathname.startsWith('/jbh/'))return await handleJbh(request,env);
+  if(url.pathname.startsWith('/workforce/'))return await handleWorkforce(request,env,{identity,boundedText,json});
   const ORDER_PATHS=['/subscriptions/orders','/subscriptions/checkout','/subscriptions/status','/subscriptions/entitlement','/orders/checkout'];
   if((ORDER_PATHS.includes(url.pathname)||url.pathname==='/checkout') && env.PAYMENTS_ENABLED!=='true')return json({error:'payments_disabled'},503);
   ready(env,url.pathname==='/webhook');
