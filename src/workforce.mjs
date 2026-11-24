@@ -1,3 +1,4 @@
+import {authorizeWorkspace,demoWorkspace,demoPayroll,workspaceToolDefinitions,callWorkspaceTool} from './workforce-workspace.mjs';
 // Synthetic weekly examples only. No worker records, provider calls or payments.
 const fields=['regularMinutes','overtimeMinutes','hourlyCents'];
 const inputSchema={type:'object',additionalProperties:false,required:fields,properties:{regularMinutes:{type:'integer',minimum:0,maximum:2400},overtimeMinutes:{type:'integer',minimum:0,maximum:7680},hourlyCents:{type:'integer',minimum:1,maximum:1000000}}};
@@ -24,8 +25,24 @@ export function workforceTools(){
 }
 export async function handleWorkforce(request,env,{identity,boundedText,json}){
   if(env.WORKFORCE_PREVIEW_ENABLED!=='true'||!env.AUTH)return json({error:'workforce_preview_disabled'},503);
-  await identity(request,env);
+  const subject=await identity(request,env);
   const path=new URL(request.url).pathname;
+  if(path==='/workforce/workspace'||path.startsWith('/workforce/workspace/')){
+    const access=await authorizeWorkspace(env,subject);
+    if(path==='/workforce/workspace'||path==='/workforce/workspace/payroll'||path==='/workforce/workspace/tools'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      if(path==='/workforce/workspace')return json(demoWorkspace(access));
+      if(path.endsWith('/payroll'))return json(demoPayroll(access));
+      return json({tools:workspaceToolDefinitions(access)});
+    }
+    if(path==='/workforce/workspace/tools/call'){
+      if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+      let data;const raw=await boundedText(request,4096);try{data=JSON.parse(raw);}catch{invalid();}
+      if(!keys(data,['name','arguments']))invalid();
+      return json(callWorkspaceTool(access,data.name,data.arguments));
+    }
+    return json({error:'not_found'},404);
+  }
   if(path==='/workforce/overview'||path==='/workforce/tools'){
     if(request.method!=='GET')return json({error:'method_not_allowed'},405);
     return json(path.endsWith('/tools')?{tools:workforceTools()}:workforceOverview());
