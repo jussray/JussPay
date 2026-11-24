@@ -195,6 +195,30 @@ test('webhook rejects bad signatures and live events',async()=>{
   assert.equal((await live.json()).error,'wrong_event_context');
 });
 
+test('Stripe webhook logs event metadata without customer payload fields',async()=>{
+  const h=jbhEnv();const {sessionId}=await paidOrder(h);
+  const entries=[];
+  const originalInfo=console.info,originalWarn=console.warn;
+  console.info=(...args)=>entries.push(args);
+  console.warn=(...args)=>entries.push(args);
+  try{
+    const event=completed('evt_safe_log',sessionId,{
+      payment_status:'paid',
+      customer_details:{email:'buyer@example.test',phone:'+15555550100'},
+      shipping_details:{name:'Test Buyer',address:{line1:'private street'}}
+    });
+    const response=await worker.fetch(await signed(event),h.env);
+    assert.equal(response.status,200);
+  }finally{
+    console.info=originalInfo;console.warn=originalWarn;
+  }
+  const output=JSON.stringify(entries);
+  assert.match(output,/evt_safe_log/);
+  assert.match(output,/checkout\.session\.completed/);
+  assert.match(output,/processed/);
+  assert.doesNotMatch(output,/buyer@example\.test|private street|Test Buyer|15555550100/);
+});
+
 test('a verified paid session marks the order paid and queues it for the owner by vendor',async()=>{
   const h=jbhEnv();const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed(completed('evt_paid',sessionId,{payment_status:'paid'})),h.env);
@@ -559,17 +583,23 @@ test('revoking checkout approval does not drop webhooks for previously created l
   assert.equal((await blocked.json()).error,'jbh_live_not_approved');
 });
 
-test('live paid orders never forward PII to the sandbox-only private receipt worker',async()=>{
-  let delivered=0;
+test('live paid orders forward a signed live-only receipt to the isolated private endpoint',async()=>{
+  const delivered=[];
   const h=liveEnv({
     JBH_PRIVATE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
-    JBH_PRIVATE_WORKER:{async fetch(){delivered++;return Response.json({});}}
+    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);return Response.json({received:true});}}
   });
   const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed({...completed('evt_live_private',sessionId),livemode:true}),h.env);
   assert.deepEqual(await r.json(),{received:true});
   assert.equal(await orderStatus(h,orderId),'paid');
-  assert.equal(delivered,0);
+  assert.equal(delivered.length,1);
+  assert.equal(new URL(delivered[0].url).pathname,'/internal/jusspay/live/paid-receipt');
+  const payload=await delivered[0].json();
+  assert.equal(payload.livemode,true);
+  assert.equal(payload.orderId,orderId);
+  assert.equal(payload.state,'awaiting_owner_dispatch');
+  assert.equal(delivered[0].headers.get('x-jbh-jusspay-signature').length,64);
 });
 
 test('live refund enters hold without automatic vendor dispatch',async()=>{
