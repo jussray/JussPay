@@ -1,3 +1,4 @@
+import {readApprovalSnapshot} from './workforce-sync.mjs';
 import {routeDemoRecords} from './workforce-records.mjs';
 import {handleDemoMcp} from './workforce-mcp.mjs';
 import {authorizeWorkspace,demoWorkspace,demoPayroll,workspaceToolDefinitions,callWorkspaceTool} from './workforce-workspace.mjs';
@@ -32,10 +33,11 @@ export async function handleWorkforce(request,env,{identity,boundedText,json}){
   if(path==='/workforce/workspace'||path.startsWith('/workforce/workspace/')){
     const access=await authorizeWorkspace(env,subject);
     if(path==='/workforce/workspace/records'||path.startsWith('/workforce/workspace/records/'))return await routeDemoRecords(request,env,access);
+    const loadSnapshot=()=>readApprovalSnapshot(env,access,routeDemoRecords);
     if(path==='/workforce/workspace'||path==='/workforce/workspace/payroll'||path==='/workforce/workspace/tools'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
-      if(path==='/workforce/workspace')return json(demoWorkspace(access));
-      if(path.endsWith('/payroll'))return json(demoPayroll(access));
+      if(path==='/workforce/workspace')return json(demoWorkspace(access,await loadSnapshot()));
+      if(path.endsWith('/payroll'))return json(demoPayroll(access,await loadSnapshot()));
       return json({tools:workspaceToolDefinitions(access)});
     }
     if(path==='/workforce/workspace/mcp-demo'){
@@ -43,14 +45,15 @@ export async function handleWorkforce(request,env,{identity,boundedText,json}){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
       const raw=await boundedText(request,4096);
       let data;try{data=JSON.parse(raw);}catch{return json({jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}},400);}
-      const result=handleDemoMcp(data,{access,list:workspaceToolDefinitions,call:callWorkspaceTool});
+      const snapshot=data?.method==='tools/call'&&Object.hasOwn(data,'id')?await loadSnapshot():null;
+      const result=handleDemoMcp(data,{access,list:workspaceToolDefinitions,call:(a,name,args)=>callWorkspaceTool(a,name,args,snapshot)});
       return result===null?new Response(null,{status:202,headers:{'cache-control':'no-store'}}):json(result);
     }
     if(path==='/workforce/workspace/tools/call'){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
       let data;const raw=await boundedText(request,4096);try{data=JSON.parse(raw);}catch{invalid();}
       if(!keys(data,['name','arguments']))invalid();
-      return json(callWorkspaceTool(access,data.name,data.arguments));
+      return json(callWorkspaceTool(access,data.name,data.arguments,await loadSnapshot()));
     }
     return json({error:'not_found'},404);
   }
