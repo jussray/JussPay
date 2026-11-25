@@ -1,3 +1,4 @@
+import {routeDemoRecords} from './workforce-records.mjs';
 import {handleDemoMcp} from './workforce-mcp.mjs';
 import {authorizeWorkspace,demoWorkspace,demoPayroll,workspaceToolDefinitions,callWorkspaceTool} from './workforce-workspace.mjs';
 // Synthetic weekly examples only. No worker records, provider calls or payments.
@@ -30,6 +31,7 @@ export async function handleWorkforce(request,env,{identity,boundedText,json}){
   const path=new URL(request.url).pathname;
   if(path==='/workforce/workspace'||path.startsWith('/workforce/workspace/')){
     const access=await authorizeWorkspace(env,subject);
+    if(path==='/workforce/workspace/records'||path.startsWith('/workforce/workspace/records/'))return await routeDemoRecords(request,env,access);
     if(path==='/workforce/workspace'||path==='/workforce/workspace/payroll'||path==='/workforce/workspace/tools'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
       if(path==='/workforce/workspace')return json(demoWorkspace(access));
