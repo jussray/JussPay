@@ -1,3 +1,4 @@
+export {WorkforceDemoBook} from './workforce-records.mjs';
 import {handleWorkforce} from './workforce.mjs';
 import {createTestOrder,planEntitlement,orderStatus,checkoutTestSubscription,checkoutOneTimeOrder,orderWebhook,validatePurchase,testKey} from './subscriptions.mjs';
 import {handleJbh,JbhOrderBook} from './jbh-orders.mjs';
