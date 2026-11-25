@@ -27,6 +27,7 @@ export async function verifyPromptosGoogle(token, env) {
     if(h.alg!=='RS256' || typeof h.kid!=='string' || !/^[A-Za-z0-9_\-.]{1,128}$/.test(h.kid) ||
       !ISSUERS.has(c.iss) || c.aud!==audience || (c.azp!==undefined && c.azp!==audience) ||
       typeof c.sub!=='string'|| !/^\d{10,32}$/.test(c.sub) ||
+      typeof c.email!=='string'||!c.email.trim()|| (c.email_verified!==true&&c.email_verified!=='true') ||
       !Number.isSafeInteger(c.exp)||c.exp<=now || c.exp>now+3700 ||
       !Number.isSafeInteger(c.iat)||c.iat>now+60 ||c.iat>c.exp ||
       (c.nbf!==undefined && (!Number.isSafeInteger(c.nbf)||c.nbf>now)))

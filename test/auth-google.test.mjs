@@ -19,7 +19,7 @@ const base64url=s=>Buffer.from(JSON.stringify(s)).toString('base64url');
 async function googleToken(claimOverrides={},headerOverrides={},signingKey=privateKey){
   const header=base64url({alg:'RS256',kid:'google-fixture-key',typ:'JWT',...headerOverrides});
   const claims=base64url({iss:'https://accounts.google.com',aud:clientId,
-    sub:'109876543210987654321',exp:unix()+1800,iat:unix()-10,...claimOverrides});
+    sub:'109876543210987654321',exp:unix()+1800,iat:unix()-10,email:'verified@example.com',email_verified:true,...claimOverrides});
   const content=header+'.'+claims;
   const signature=await cryptoWeb.subtle.sign('RSASSA-PKCS1-v1_5',signingKey,new TextEncoder().encode(content));
   return content+'.'+Buffer.from(signature).toString('base64url');
@@ -47,6 +47,18 @@ test('valid Google token produces a stable, issuer-qualified JussPay subject',as
   assert(payload.expiresAt>unix());
   assert.equal(r.headers.get('cache-control'),'no-store');
   assert.deepEqual(reads.at(-1).redirect,'error');
+});
+
+test('signed but unverified or missing Google email claims cannot authorize billing',async()=>{
+  for(const claims of [
+    {email_verified:false},{email_verified:undefined},{email_verified:'false'},
+    {email_verified:1},{email:undefined},{email:''}
+  ]){
+    const before=reads.length;
+    assert.equal((await verify(await googleToken(claims))).status,401);
+    assert.equal(reads.length,before);
+  }
+  assert.equal((await verify(await googleToken({email_verified:'true'}))).status,200);
 });
 
 test('Google identity must be configured in the private AUTH service',async()=>{
