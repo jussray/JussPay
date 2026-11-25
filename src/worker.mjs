@@ -100,6 +100,7 @@ export default {async fetch(request,env){try{
         entitlements:catalog[id].entitlements,
         ...(catalog[id].intro?{introOffer:{firstInvoiceAmountMinor:100,
           renewalAmountMinor:catalog[id].unitAmount,renewalInterval:'month',
+          billingMode:env.STRIPE_LIVE==='false'?'test':env.STRIPE_LIVE==='true'?'live':'unknown',
           approved:catalog[id].intro.approved}}:{})}:{})
     })));
   }
@@ -164,7 +165,7 @@ export class BillingAccount {
     if(path==='/checkout'&&this.env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');
     if(path==='/checkout'&&await this.state.storage.get('suspended'))fail(409,'billing_account_suspended');
     // A promised $1 first month must never silently turn into regular-price checkout.
-    if(path==='/checkout'&&input.product==='promptos'&&(this.env.INTRODUCTORY_OFFERS_ENABLED==='true'||this.env.STRIPE_LIVE==='true')&&!selectedPlan.intro)fail(503,'introductory_offer_required');
+    if(path==='/checkout'&&input.product==='promptos'&&(this.env.INTRODUCTORY_OFFERS_ENABLED==='true'||this.env.STRIPE_LIVE==='true'||input.introConsent!==undefined)&&!selectedPlan.intro)fail(503,'introductory_offer_required');
     if(path==='/checkout'&&selectedPlan.intro){
       const p=selectedPlan,c=input.introConsent;
       if(this.env.INTRODUCTORY_OFFERS_ENABLED!=='true'||this.env.STRIPE_LIVE!=='false')fail(503,'introductory_offer_disabled');
@@ -213,7 +214,7 @@ export class BillingAccount {
               session.amount_total!==100||typeof session.url!=='string'||
               !session.url.startsWith('https://checkout.stripe.com/')))
             fail(503,'introductory_checkout_total_mismatch');
-          return json({url:session.url,...(p.intro?{firstInvoiceAmountMinor:100,
+          return json({url:session.url,...(p.intro?{billingMode:'test',firstInvoiceAmountMinor:100,
             renewalAmountMinor:p.unitAmount,currency:'usd',interval:'month',termsUrl:p.termsUrl}:{})});
         }
         await stripe(this.env,`checkout/sessions/${encodeURIComponent(attempt.id)}/expire`,'POST',{},`expire-${attempt.key||attempt.id}`);
@@ -258,7 +259,7 @@ export class BillingAccount {
         });
       });
     }else await this.state.storage.put(`checkout:${input.product}`,{...attempt,id:s.id});
-    return json({url:s.url,...(p.intro?{firstInvoiceAmountMinor:100,renewalAmountMinor:p.unitAmount,
+    return json({url:s.url,...(p.intro?{billingMode:'test',firstInvoiceAmountMinor:100,renewalAmountMinor:p.unitAmount,
       currency:'usd',interval:'month',termsUrl:p.termsUrl}: {})});
   }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}}
   async readEntitlements(){

@@ -205,3 +205,25 @@ test('catalog never advertises checkout while the payment switch is off',async()
     }
   }
 });
+
+test('a submitted introductory consent must never fall back to an ordinary PromptOS checkout',async()=>{
+  const s=scenario();
+  s.env.INTRODUCTORY_OFFERS_ENABLED='false';
+  s.env.APPROVED_PLANS=JSON.stringify({promptos:{...plan,intro:undefined}});
+  const r=await s.checkout();
+  assert.equal(r.status,503);
+  assert.equal((await r.json()).error,'introductory_offer_required');
+  assert.equal(s.calls.length,0);
+});
+
+test('eligible introductory catalog and checkout receipts explicitly identify sandbox mode',async()=>{
+  const s=scenario();
+  const offer=(await (await worker.fetch(new Request('https://billing.example/catalog'),s.env)).json()).find(x=>x.id==='promptos');
+  assert.equal(offer.introOffer.billingMode,'test');
+  const response=await s.checkout();
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).billingMode,'test');
+  const reused=await s.checkout();
+  assert.equal(reused.status,200);
+  assert.equal((await reused.json()).billingMode,'test');
+});
