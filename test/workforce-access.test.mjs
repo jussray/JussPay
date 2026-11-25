@@ -12,3 +12,13 @@ test('denies revoked or expired membership and ambiguous company grants',async()
 test('disabled or invalid configuration fails closed',async()=>{for(const e of [{}, {...env(),WORKFORCE_ACCESS_MODE:'live'}, {...env(),WORKFORCE_MEMBERSHIPS:'invalid'},env([grant('u1','admin')])])assert.equal((await call(e)).status,503);});
 test('only exact private verify route and POST are accepted',async()=>{assert.equal((await call(env(),req({},'GET'))).status,405);assert.equal((await call(env(),req({},'POST','https://other.invalid/verify'))).status,404);});
 test('oversized bodies and malformed JSON are refused',async()=>{assert.equal((await call(env(),req({subject:'x'.repeat(3000),audience:'jusspay-workforce'}))).status,413);assert.equal((await call(env(),new Request('https://workforce-access.internal/verify',{method:'POST',body:'{' }))).status,400);});
+
+import {authorizeWorkspace,demoPayroll} from '../src/workforce-workspace.mjs';
+test('authority-to-workspace contract denies unknown and revoked membership on next lookup',async()=>{
+ const config=env([grant('u1','payroll_admin')]);
+ const binding={WORKFORCE_ACCESS:{fetch:request=>worker.fetch(request,config)}};
+ assert.equal(demoPayroll(await authorizeWorkspace(binding,'u1')).grossCents,161000);
+ await assert.rejects(authorizeWorkspace(binding,'u2'),{status:403});
+ config.WORKFORCE_MEMBERSHIPS='[]';
+ await assert.rejects(authorizeWorkspace(binding,'u1'),{status:403});
+});
