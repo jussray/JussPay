@@ -124,6 +124,15 @@ async function requireOwner(request,env){
   if(!env.JBH_OWNER_KEY||env.JBH_OWNER_KEY.length<32||!await sameSecret(request.headers.get('x-jbh-owner-key'),env.JBH_OWNER_KEY))fail(401,'owner_key_required');
 }
 
+async function requireOwnerQueueRead(request,env){
+  // The bridge credential is read-only. Never use it to dispatch orders,
+  // inspect payment readiness or authorize any other privileged route.
+  const supplied=request.headers.get('x-jbh-owner-key');
+  if(typeof env.JBH_OWNER_KEY==='string'&&env.JBH_OWNER_KEY.length>=32&&await sameSecret(supplied,env.JBH_OWNER_KEY))return;
+  if(typeof env.JBH_OWNER_BRIDGE_KEY==='string'&&env.JBH_OWNER_BRIDGE_KEY.length>=32&&await sameSecret(supplied,env.JBH_OWNER_BRIDGE_KEY))return;
+  fail(401,'owner_key_required');
+}
+
 // Public entry for /jbh/* paths.
 export async function handleJbh(request,env){
   const path=new URL(request.url).pathname;
@@ -240,11 +249,12 @@ export async function handleJbh(request,env){
     }
     if(path==='/jbh/fulfillment'||path.startsWith('/jbh/fulfillment/')){
       jbhReady(env,true);
-      await requireOwner(request,env);
       if(path==='/jbh/fulfillment'){
+        await requireOwnerQueueRead(request,env);
         if(request.method!=='GET')return json({error:'method_not_allowed'},405);
         return toBook(env,'/fulfillment',{});
       }
+      await requireOwner(request,env);
       const m=path.match(/^\/jbh\/fulfillment\/(jbho_[0-9a-f-]{36})\/dispatched$/);
       if(!m||!ORDER_ID.test(m[1]))fail(404,'not_found');
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
