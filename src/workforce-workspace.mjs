@@ -1,4 +1,4 @@
-import {calculateGrossExample,EXAMPLE_RULE_VERSION} from './payroll-rules.mjs';
+import {calculateDemoBatch} from './payroll-batch.mjs';
 import {overlayApprovals} from './workforce-sync.mjs';
 const roles=new Set(['owner','payroll_admin','reviewer']);
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
@@ -12,6 +12,6 @@ export async function authorizeWorkspace(env,subject){
 const people=[{id:'example-1',name:'Example A',status:'active',onboarding:'complete'},{id:'example-2',name:'Example B',status:'active',onboarding:'complete'},{id:'example-3',name:'Example C',status:'pending',onboarding:'pending'}];
 const timesheets=[{id:'example-1',regularMinutes:2400,overtimeMinutes:300,hourlyCents:2000,status:'approved'},{id:'example-2',regularMinutes:1800,overtimeMinutes:0,hourlyCents:2200,status:'approved'},{id:'example-3',regularMinutes:1200,overtimeMinutes:0,hourlyCents:2000,status:'pending'}];
 export function demoWorkspace(access,snapshot=null){requireRole(access);return {mode:'synthetic_preview',providerConnected:false,people:structuredClone(people),timesheets:overlayApprovals(timesheets,snapshot),ledgerVersion:snapshot?.version??null,canPreview:access.role!=='reviewer',submittable:false};}
-export function demoPayroll(access,snapshot=null){requireRole(access,true);const approved=overlayApprovals(timesheets,snapshot).filter(t=>t.status==='approved');return {mode:'synthetic_preview',grossCents:approved.reduce((total,t)=>total+calculateGrossExample({hourlyCents:t.hourlyCents,regularMinutes:t.regularMinutes,overtimeMinutes:t.overtimeMinutes}).grossCents,0),currency:'usd',ruleVersion:EXAMPLE_RULE_VERSION,ledgerVersion:snapshot?.version??null,includedCount:approved.length,excludedCount:timesheets.length-approved.length,netCents:null,taxCents:null,providerConnected:false,submittable:false};}
+export function demoPayroll(access,snapshot=null){requireRole(access,true);return {...calculateDemoBatch(overlayApprovals(timesheets,snapshot)),ledgerVersion:snapshot?.version??null};}
 export function workspaceToolDefinitions(access){requireRole(access);return ['workforce_demo_overview',...(access.role==='reviewer'?[]:['workforce_demo_payroll'])].map(name=>({name,description:'Read fictional workforce preview data only',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}}));}
 export function callWorkspaceTool(access,name,args,snapshot=null){if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length)fail(400,'invalid_tool_arguments');if(!workspaceToolDefinitions(access).some(t=>t.name===name))fail(404,'tool_unavailable');return name==='workforce_demo_overview'?demoWorkspace(access,snapshot):demoPayroll(access,snapshot);}
