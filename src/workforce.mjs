@@ -1,3 +1,4 @@
+import {calculateGrossExample} from './payroll-rules.mjs';
 import {readApprovalSnapshot} from './workforce-sync.mjs';
 import {routeDemoRecords} from './workforce-records.mjs';
 import {handleDemoMcp} from './workforce-mcp.mjs';
@@ -8,18 +9,7 @@ const inputSchema={type:'object',additionalProperties:false,required:fields,prop
 function invalid(){throw Object.assign(new Error('invalid_workforce_input'),{status:400});}
 function object(value){return value!==null&&typeof value==='object'&&!Array.isArray(value);}
 function keys(value,expected){return object(value)&&Object.keys(value).length===expected.length&&expected.every(k=>Object.hasOwn(value,k));}
-export function previewPayroll(input){
-  if(!keys(input,fields))invalid();
-  for(const key of fields){
-    const {minimum,maximum}=inputSchema.properties[key];
-    if(!Number.isSafeInteger(input[key])||input[key]<minimum||input[key]>maximum)invalid();
-  }
-  const {regularMinutes,overtimeMinutes,hourlyCents}=input;
-  if(regularMinutes+overtimeMinutes>10080)invalid();
-  // Illustrative 1.5x overtime; not a jurisdiction-specific wage calculation.
-  const grossCents=Math.round(hourlyCents*(2*regularMinutes+3*overtimeMinutes)/120);
-  return {mode:'synthetic_preview',currency:'usd',grossCents,netCents:null,taxCents:null,submittable:false,providerConnected:false,assumption:'Example only: 1.5x overtime. No tax, deductions or legal payroll determination.'};
-}
+export function previewPayroll(input){return calculateGrossExample(input);}
 export function workforceOverview(){
   return {mode:'synthetic_preview',providerConnected:false,livePayrollVerified:false,submittable:false,modules:{people:'not_implemented',onboarding:'not_implemented',timesheets:'example_inputs_only',payroll:'gross_example_only',taxes:'provider_required',reconciliation:'provider_required',approval:'no_submission_available'}};
 }
