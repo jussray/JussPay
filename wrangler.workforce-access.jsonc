@@ -1,0 +1,11 @@
+{
+  "name": "jusspay-workforce-access",
+  "main": "src/workforce-access.mjs",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "WORKFORCE_ACCESS_MODE": "disabled",
+    "WORKFORCE_MEMBERSHIPS": "[]"
+  }
+}
