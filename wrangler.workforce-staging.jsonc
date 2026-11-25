@@ -1,0 +1,46 @@
+{
+  "name": "jusspay-workforce-staging",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [
+    {
+      "binding": "AUTH",
+      "service": "jusspay-workforce-staging-auth"
+    },
+    {
+      "binding": "WORKFORCE_ACCESS",
+      "service": "jusspay-workforce-staging-access"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WORKFORCE_RECORDS",
+        "class_name": "WorkforceDemoBook"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "WorkforceDemoBook"
+      ]
+    }
+  ],
+  "vars": {
+    "WORKFORCE_PREVIEW_ENABLED": "true",
+    "WORKFORCE_RECORDS_ENABLED": "true",
+    "WORKFORCE_MCP_DEMO_ENABLED": "false",
+    "PAYMENTS_ENABLED": "false",
+    "SUBSCRIPTIONS_TEST_ENABLED": "false",
+    "STRIPE_LIVE": "false",
+    "APPROVED_PLANS": "{}",
+    "JBH_ORDERS_ENABLED": "false",
+    "JBH_STRIPE_LIVE": "false",
+    "JBH_LIVE_CHARGES_APPROVED": "false",
+    "JBH_PRIVATE_RECEIPTS_ENABLED": "false"
+  }
+}
