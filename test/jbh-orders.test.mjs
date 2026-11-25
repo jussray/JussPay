@@ -683,3 +683,47 @@ test('owner launch preflight identifies missing vendor proof and catalog without
   assert.equal((await empty.json()).checks.approvedCatalogConfigured,false);
   assert.equal(h.calls.length,0);
 });
+
+test('read-only private bridge can view fulfillment but cannot dispatch or invoke other owner APIs',async()=>{
+  const bridgeKey='bridge_'+('c'.repeat(48));
+  const h=jbhEnv({JBH_OWNER_BRIDGE_KEY:bridgeKey});
+  const {orderId,sessionId}=await paidOrder(h);
+  const paid=await worker.fetch(await signed(completed('evt_bridge_read',sessionId)),h.env);
+  assert.equal(paid.status,200);
+  const header={'x-jbh-owner-key':bridgeKey};
+  const before=h.calls.length;
+  const read=await worker.fetch(get('/jbh/fulfillment',header),h.env);
+  assert.equal(read.status,200);
+  const body=await read.json();
+  assert.equal(body.queue.length,1);
+  assert.equal(body.queue[0].orderId,orderId);
+  assert.equal(h.calls.length,before,'bridge read makes no Stripe API calls');
+
+  const dispatch=await worker.fetch(post('/jbh/fulfillment/'+orderId+'/dispatched',{note:'not allowed'},header),h.env);
+  assert.equal(dispatch.status,401);
+  assert.equal((await dispatch.json()).error,'owner_key_required');
+  for(const path of ['/jbh/preflight','/jbh/launch-readiness','/jbh/vendor-adapters']){
+    const denied=await worker.fetch(get(path,header),h.env);
+    assert.equal(denied.status,401,'bridge may not access '+path);
+  }
+  const original=await worker.fetch(get('/jbh/fulfillment',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(original.status,200);
+  const allowed=await worker.fetch(post('/jbh/fulfillment/'+orderId+'/dispatched',{}, {'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(allowed.status,200);
+});
+test('missing, short, wrong or deprovisioned bridge keys do not grant fulfillment access',async()=>{
+  const valid='s'.repeat(48);
+  const h=jbhEnv({JBH_OWNER_BRIDGE_KEY:undefined});
+  const validHeader={'x-jbh-owner-key':valid};
+  for(const configured of [undefined,'', 'short',null]){
+    h.env.JBH_OWNER_BRIDGE_KEY=configured;
+    const r=await worker.fetch(get('/jbh/fulfillment',validHeader),h.env);
+    assert.equal(r.status,401);
+  }
+  h.env.JBH_OWNER_BRIDGE_KEY=valid;
+  assert.equal((await worker.fetch(get('/jbh/fulfillment',{'x-jbh-owner-key':'wrong'}),h.env)).status,401);
+  assert.equal((await worker.fetch(get('/jbh/fulfillment',validHeader),h.env)).status,200);
+  h.env.JBH_OWNER_BRIDGE_KEY=undefined;
+  assert.equal((await worker.fetch(get('/jbh/fulfillment',validHeader),h.env)).status,401);
+  assert.equal((await worker.fetch(get('/jbh/fulfillment',{'x-jbh-owner-key':OWNER_KEY}),h.env)).status,200);
+});
