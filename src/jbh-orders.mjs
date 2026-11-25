@@ -10,6 +10,7 @@
 // awaiting_owner_dispatch. Nothing here contacts, pays or orders from a vendor.
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
 import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from './jbh-vendor-adapters.mjs';
+import {jbhConfigurationReview} from './jbh-preflight.mjs';
 
 // Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
 // account ID and never shares the live order book.
@@ -111,6 +112,14 @@ async function jsonBody(request,limit){
 const book=env=>env.JBH_ORDERS.get(env.JBH_ORDERS.idFromName(`${jbhLive(env)?'live':'test'}:jbh-orders`));
 const toBook=(env,path,body)=>book(env).fetch(new Request(`https://jbh-orders.internal${path}`,{method:'POST',body:JSON.stringify(body)}));
 
+function requireLiveOwnerQueue(env){
+  // Never charge a live customer if nobody can securely retrieve their paid order.
+  // Existing webhook processing and customer order readback must remain available
+  // if the owner credential is accidentally removed after checkout.
+  if(jbhLive(env)&&(typeof env.JBH_OWNER_KEY!=='string'||env.JBH_OWNER_KEY.length<32))
+    fail(503,'jbh_owner_queue_unavailable');
+}
+
 async function requireOwner(request,env){
   if(!env.JBH_OWNER_KEY||env.JBH_OWNER_KEY.length<32||!await sameSecret(request.headers.get('x-jbh-owner-key'),env.JBH_OWNER_KEY))fail(401,'owner_key_required');
 }
@@ -118,6 +127,8 @@ async function requireOwner(request,env){
 // Public entry for /jbh/* paths.
 export async function handleJbh(request,env){
   const path=new URL(request.url).pathname;
+  let webhookContext=null;
+  const webhookStartedAt=path==='/jbh/webhook'?Date.now():0;
   try{
     if(path==='/jbh/webhook'){
       if(request.method!=='POST')return json({error:'method_not_allowed'},405);
@@ -125,10 +136,25 @@ export async function handleJbh(request,env){
       const raw=await boundedText(request,262144);
       if(!await verifySignature(raw,request.headers.get('stripe-signature'),env.JBH_STRIPE_WEBHOOK_SECRET))fail(400,'invalid_signature');
       let event;try{event=JSON.parse(raw);}catch{fail(400,'invalid_event');}
+      webhookContext={eventId:event?.id,eventType:event?.type,livemode:event?.livemode};
       if(!/^evt_/.test(event.id||'')||event.livemode!==jbhLive(env)||(event.account&&event.account!==(jbhLive(env)?JBH_LIVE_ACCOUNT:env.JBH_TEST_ACCOUNT_ID)))fail(400,'wrong_event_context');
-      if(!JBH_EVENTS.has(event.type))return json({received:true,ignored:true});
+      if(!JBH_EVENTS.has(event.type)){
+        console.info('[JBH_STRIPE_WEBHOOK] ignored',{...webhookContext,reason:'unsupported_event'});
+        return json({received:true,ignored:true});
+      }
       await jbhAccount(env,false);
-      return toBook(env,'/event',{event});
+      const response=await toBook(env,'/event',{event});
+      console.info('[JBH_STRIPE_WEBHOOK] processed',{...webhookContext,status:response.status,elapsedMs:Date.now()-webhookStartedAt});
+      return response;
+    }
+    if(path==='/jbh/preflight'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      await requireOwner(request,env);
+      const result=jbhConfigurationReview(env,{
+        ready:()=>jbhReady(env),catalog:()=>jbhCatalog(env),shipping:()=>jbhShipping(env),
+        owner:()=>requireLiveOwnerQueue(env),authority:items=>liveVendorAuthority(env,items)
+      });
+      return json(result,result.configurationValid?200:503);
     }
     if(path==='/jbh/health'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
@@ -136,6 +162,7 @@ export async function handleJbh(request,env){
       if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
       const live=jbhLive(env);
       if(live&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+      requireLiveOwnerQueue(env);
       if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
       jbhShipping(env);
       if(live)liveVendorAuthority(env,Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor})));
@@ -148,6 +175,7 @@ export async function handleJbh(request,env){
       if(path==='/jbh/checkout'){
         if(request.method!=='POST')return json({error:'method_not_allowed'},405);
         if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
+        requireLiveOwnerQueue(env);
         const input=await jsonBody(request,4096);
         // The storefront sends one requestId per shopper attempt and reuses it on retry.
         if(!REQUEST_ID.test(input.requestId||''))fail(400,'request_id_required');
@@ -160,6 +188,48 @@ export async function handleJbh(request,env){
       const id=path.slice('/jbh/orders/'.length);
       if(!ORDER_ID.test(id))fail(404,'not_found');
       return toBook(env,'/order',{id});
+    }
+    if(path==='/jbh/launch-readiness'){
+      // Owner-only, no-provider-call preflight. Configuration evidence is not
+      // proof of merchant, inventory, or payment readiness.
+      await requireOwner(request,env);
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      let catalog=null,shippingConfigured=false,vendorEvidenceContractValid=false;
+      try{
+        const parsed=jbhCatalog(env);
+        if(Object.keys(parsed).length>0)catalog=parsed;
+      }catch{}
+      try{jbhShipping(env);shippingConfigured=true;}catch{}
+      if(catalog){
+        try{
+          liveVendorAuthority(env,Object.entries(catalog).map(([sku,p])=>({sku,vendor:p.vendor})));
+          vendorEvidenceContractValid=true;
+        }catch{}
+      }
+      let validOrigin=false;
+      try{
+        const origin=new URL(env.JBH_STOREFRONT_ORIGIN);
+        validOrigin=origin.protocol==='https:'&&origin.origin===env.JBH_STOREFRONT_ORIGIN;
+      }catch{}
+      const checks={
+        liveStripeMode:env.JBH_STRIPE_LIVE==='true',
+        orderBookBound:typeof env.JBH_ORDERS?.get==='function'&&typeof env.JBH_ORDERS?.idFromName==='function',
+        ordersEnabled:env.JBH_ORDERS_ENABLED==='true',
+        liveStripeKeyConfigured:/^(?:sk|rk)_live_/.test(env.JBH_STRIPE_SECRET_KEY||''),
+        webhookSecretConfigured:typeof env.JBH_STRIPE_WEBHOOK_SECRET==='string'&&env.JBH_STRIPE_WEBHOOK_SECRET.length>0,
+        storefrontKeyConfigured:typeof env.JBH_STOREFRONT_KEY==='string'&&env.JBH_STOREFRONT_KEY.length>=32,
+        storefrontOriginConfigured:validOrigin,
+        approvedCatalogConfigured:catalog!==null,
+        shippingConfigured,
+        vendorEvidenceContractValid,
+      };
+      return json({
+        readOnly:true,
+        configurationComplete:Object.values(checks).every(Boolean),
+        founderChargesApproved:env.JBH_LIVE_CHARGES_APPROVED==='true',
+        providerVerified:false,
+        checks
+      });
     }
     if(path==='/jbh/vendor-adapters'){
       // Owner readback is deliberately independent of payment activation.
@@ -183,7 +253,13 @@ export async function handleJbh(request,env){
       return toBook(env,'/dispatched',{id:m[1],note:input.note||null});
     }
     return json({error:'not_found'},404);
-  }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}
+  }catch(e){
+    if(path==='/jbh/webhook')console.warn('[JBH_STRIPE_WEBHOOK] rejected',{
+      ...(webhookContext||{}),status:e.status||500,
+      error:e.status?'request_rejected':'processing_error'
+    });
+    return json({error:e.status?e.message:'internal_error'},e.status||500);
+  }
 }
 
 // One serialized order book per mode. Storage keys: order:<id>, request:<requestId>,
@@ -283,7 +359,6 @@ export class JbhOrderBook{
 
   async forwardPrivateReceipt(orderId){
     const env=this.env,storage=this.state.storage;
-    if(jbhLive(env))return; // Sandbox-only private receipt target must never receive live PII.
     const pending=await storage.get(`private-receipt:${orderId}`);
     if(!pending||pending.delivered===true)return;
     const order=await storage.get(`order:${orderId}`);
@@ -296,7 +371,7 @@ export class JbhOrderBook{
     const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
     const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
     try{
-      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request(`http://localhost/internal/jusspay/${jbhLive(env)?'live':'sandbox'}/paid-receipt`,{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
       if(response.ok)await storage.put(`private-receipt:${orderId}`,{...pending,delivered:true});
     }catch{
       // Retain the durable pending receipt for a later signed webhook replay.
@@ -305,7 +380,6 @@ export class JbhOrderBook{
 
   async forwardPrivateHold(orderId){
     const env=this.env,storage=this.state.storage;
-    if(jbhLive(env))return; // Live hold delivery needs a separately reviewed endpoint.
     const pending=await storage.get(`private-hold:${orderId}`);
     if(!pending||pending.delivered===true)return;
     if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true'||!env.JBH_PRIVATE_WORKER?.fetch||
@@ -315,7 +389,7 @@ export class JbhOrderBook{
     const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
     const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
     try{
-      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/sandbox/paid-receipt',{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request(`http://localhost/internal/jusspay/${jbhLive(env)?'live':'sandbox'}/paid-receipt`,{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
       if(response.ok)await storage.put(`private-hold:${orderId}`,{...pending,delivered:true});
     }catch{
       // Keep the pending hold for a later webhook replay.
@@ -380,11 +454,11 @@ export class JbhOrderBook{
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
       if(next && ['refunded','partially_refunded','disputed'].includes(next.status)){
-        await txn.put(`private-hold:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:next.status}});
+        await txn.put(`private-hold:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:jbhLive(this.env),orderId,paymentIntentId:next.paymentIntent,state:next.status}});
       }
       if(queue==='add'){
         await txn.put(`queue:${orderId}`,orderId);
-        await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:false,orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
+        await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:jbhLive(this.env),orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
       }
       await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:Date.now(),...(reason?{note:reason}:{})});
     });

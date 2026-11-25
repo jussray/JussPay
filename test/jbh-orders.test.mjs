@@ -195,6 +195,30 @@ test('webhook rejects bad signatures and live events',async()=>{
   assert.equal((await live.json()).error,'wrong_event_context');
 });
 
+test('Stripe webhook logs event metadata without customer payload fields',async()=>{
+  const h=jbhEnv();const {sessionId}=await paidOrder(h);
+  const entries=[];
+  const originalInfo=console.info,originalWarn=console.warn;
+  console.info=(...args)=>entries.push(args);
+  console.warn=(...args)=>entries.push(args);
+  try{
+    const event=completed('evt_safe_log',sessionId,{
+      payment_status:'paid',
+      customer_details:{email:'buyer@example.test',phone:'+15555550100'},
+      shipping_details:{name:'Test Buyer',address:{line1:'private street'}}
+    });
+    const response=await worker.fetch(await signed(event),h.env);
+    assert.equal(response.status,200);
+  }finally{
+    console.info=originalInfo;console.warn=originalWarn;
+  }
+  const output=JSON.stringify(entries);
+  assert.match(output,/evt_safe_log/);
+  assert.match(output,/checkout\.session\.completed/);
+  assert.match(output,/processed/);
+  assert.doesNotMatch(output,/buyer@example\.test|private street|Test Buyer|15555550100/);
+});
+
 test('a verified paid session marks the order paid and queues it for the owner by vendor',async()=>{
   const h=jbhEnv();const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed(completed('evt_paid',sessionId,{payment_status:'paid'})),h.env);
@@ -559,17 +583,23 @@ test('revoking checkout approval does not drop webhooks for previously created l
   assert.equal((await blocked.json()).error,'jbh_live_not_approved');
 });
 
-test('live paid orders never forward PII to the sandbox-only private receipt worker',async()=>{
-  let delivered=0;
+test('live paid orders forward a signed live-only receipt to the isolated private endpoint',async()=>{
+  const delivered=[];
   const h=liveEnv({
     JBH_PRIVATE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
-    JBH_PRIVATE_WORKER:{async fetch(){delivered++;return Response.json({});}}
+    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);return Response.json({received:true});}}
   });
   const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed({...completed('evt_live_private',sessionId),livemode:true}),h.env);
   assert.deepEqual(await r.json(),{received:true});
   assert.equal(await orderStatus(h,orderId),'paid');
-  assert.equal(delivered,0);
+  assert.equal(delivered.length,1);
+  assert.equal(new URL(delivered[0].url).pathname,'/internal/jusspay/live/paid-receipt');
+  const payload=await delivered[0].json();
+  assert.equal(payload.livemode,true);
+  assert.equal(payload.orderId,orderId);
+  assert.equal(payload.state,'awaiting_owner_dispatch');
+  assert.equal(delivered[0].headers.get('x-jbh-jusspay-signature').length,64);
 });
 
 test('live refund enters hold without automatic vendor dispatch',async()=>{
@@ -579,4 +609,77 @@ test('live refund enters hold without automatic vendor dispatch',async()=>{
   assert.deepEqual(await r.json(),{received:true});
   assert.equal(await orderStatus(h,orderId),'refunded');
   assert.equal((await queue(h))[0].status,'hold');
+});
+
+test('live readiness checks approved vendor handoff before contacting Stripe',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({
+    JBH_VENDOR_SALES_AUTHORITY:'{}',
+    JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})
+  });
+  const r=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(r.status,503);
+  assert.equal((await r.json()).error,'jbh_vendor_not_verified');
+  assert.equal(h.calls.length,0,'health must not call Stripe when vendor handoff is unverified');
+});
+
+test('live readiness confirms the Beauty Co account without creating a Checkout Session',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})});
+  const r=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(r.status,200);
+  assert.deepEqual(await r.json(),{ready:true,mode:'live',chargesEnabled:true});
+  assert.deepEqual(h.calls.map(c=>c.path),['account']);
+});
+
+
+test('live checkout and health refuse an inaccessible owner fulfillment queue before Stripe',async()=>{
+  const h=liveEnv({JBH_OWNER_KEY:undefined});
+  const health=await worker.fetch(get('/jbh/health',sf),h.env);
+  assert.equal(health.status,503);
+  assert.equal((await health.json()).error,'jbh_owner_queue_unavailable');
+  const checkout=await worker.fetch(post('/jbh/checkout',{items:[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1}]},sf),h.env);
+  assert.equal(checkout.status,503);
+  assert.equal((await checkout.json()).error,'jbh_owner_queue_unavailable');
+  assert.equal(h.calls.length,0,'no Stripe calls without owner fulfillment access');
+});
+
+test('owner launch preflight reports configuration without opening a payment session',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({JBH_LIVE_CHARGES_APPROVED:'false',JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})});
+  const r=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(r.status,200);
+  const body=await r.json();
+  assert.equal(body.readOnly,true);
+  assert.equal(body.configurationComplete,true);
+  assert.equal(body.founderChargesApproved,false);
+  assert.equal(body.providerVerified,false);
+  assert.equal(body.checks.vendorEvidenceContractValid,true);
+  assert.equal(h.calls.length,0,'read-only preflight must never call Stripe');
+});
+
+test('owner launch preflight is private, GET-only and fail-closed',async()=>{
+  const h=liveEnv();
+  const denied=await worker.fetch(get('/jbh/launch-readiness'),h.env);
+  assert.equal(denied.status,401);
+  const wrong=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':'wrong'}),h.env);
+  assert.equal(wrong.status,401);
+  const method=await worker.fetch(post('/jbh/launch-readiness',{}, {'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(method.status,405);
+  assert.equal(h.calls.length,0);
+});
+
+test('owner launch preflight identifies missing vendor proof and catalog without provider calls',async()=>{
+  const sku='BRAZ-SEW-BW-10-12-14';
+  const h=liveEnv({JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]}),JBH_VENDOR_SALES_AUTHORITY:'{}'});
+  const bad=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(bad.status,200);
+  const missingVendor=await bad.json();
+  assert.equal(missingVendor.configurationComplete,false);
+  assert.equal(missingVendor.checks.vendorEvidenceContractValid,false);
+  h.env.JBH_CATALOG='{}';
+  const empty=await worker.fetch(get('/jbh/launch-readiness',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(empty.status,200);
+  assert.equal((await empty.json()).checks.approvedCatalogConfigured,false);
+  assert.equal(h.calls.length,0);
 });
