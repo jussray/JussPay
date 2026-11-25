@@ -185,3 +185,23 @@ test('signed Stripe invoice webhook verifies the $1 and refund revokes access wi
   assert.equal(refunded.status,200);
   assert.deepEqual(await s.billing.readEntitlements(),[]);
 });
+
+test('catalog never advertises checkout while the payment switch is off',async()=>{
+  for(const flag of [undefined,'false','true']){
+    const s=scenario();
+    if(flag===undefined)delete s.env.PAYMENTS_ENABLED;else s.env.PAYMENTS_ENABLED=flag;
+    const response=await worker.fetch(new Request('https://billing.example/catalog'),s.env);
+    assert.equal(response.status,200);
+    const offer=(await response.json()).find(x=>x.id==='promptos');
+    assert.equal(offer.purchaseStatus,flag==='true'?'requires_provider_validation':'unavailable');
+    assert.equal(offer.providerAvailabilityVerified,false);
+    assert.equal(offer.offerConfigured,true);
+    assert.equal(s.calls.length,0);
+    if(flag!=='true'){
+      const checkout=await s.checkout();
+      assert.equal(checkout.status,503);
+      assert.equal((await checkout.json()).error,'payments_disabled');
+      assert.equal(s.calls.length,0);
+    }
+  }
+});

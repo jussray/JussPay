@@ -90,7 +90,7 @@ export default {async fetch(request,env){try{
   if(url.pathname==='/catalog' && request.method==='GET'){
     const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({
       id,name,
-      purchaseStatus:operational&&catalog[id]&&
+      purchaseStatus:operational&&env.PAYMENTS_ENABLED==='true'&&catalog[id]&&
         (id!=='promptos'||catalog[id].intro)&&
         (!catalog[id].intro||(env.INTRODUCTORY_OFFERS_ENABLED==='true'&&env.STRIPE_LIVE==='false'))
         ?'requires_provider_validation':'unavailable',
