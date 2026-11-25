@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import worker from '../src/workforce-access.mjs';
+const now=()=>Math.floor(Date.now()/1000);
+const grant=(subject='u1',role='owner',companyId='c1')=>({subject,role,companyId,expiresAt:now()+120});
+const env=(grants=[grant()])=>({WORKFORCE_ACCESS_MODE:'synthetic_preview',WORKFORCE_MEMBERSHIPS:JSON.stringify(grants)});
+const req=(body={subject:'u1',audience:'jusspay-workforce'},method='POST',url='https://workforce-access.internal/verify')=>new Request(url,{method,...(method==='POST'?{body:JSON.stringify(body)}:{})});
+const call=(e,r=req())=>worker.fetch(r,e);
+test('explicit active membership returns only its scoped grant',async()=>{const r=await call(env());assert.equal(r.status,200);const b=await r.json();assert.equal(b.subject,'u1');assert.equal(b.companyId,'c1');assert.equal(b.role,'owner');assert.equal(b.audience,'jusspay-workforce');assert.ok(b.expiresAt<=now()+60);assert.equal(r.headers.get('cache-control'),'no-store');});
+test('rejects caller-selected company, wrong audience and unrecognized identity',async()=>{for(const body of [{subject:'u1',audience:'jusspay-workforce',companyId:'c2'},{subject:'u1',audience:'other'},{subject:'u2',audience:'jusspay-workforce'}])assert.ok([400,403].includes((await call(env(),req(body))).status));});
+test('denies revoked or expired membership and ambiguous company grants',async()=>{for(const grants of [[],[{...grant(),expiresAt:now()-1}],[grant(),grant('u1','reviewer','c2')]])assert.equal((await call(env(grants))).status,403);});
+test('disabled or invalid configuration fails closed',async()=>{for(const e of [{}, {...env(),WORKFORCE_ACCESS_MODE:'live'}, {...env(),WORKFORCE_MEMBERSHIPS:'invalid'},env([grant('u1','admin')])])assert.equal((await call(e)).status,503);});
+test('only exact private verify route and POST are accepted',async()=>{assert.equal((await call(env(),req({},'GET'))).status,405);assert.equal((await call(env(),req({},'POST','https://other.invalid/verify'))).status,404);});
+test('oversized bodies and malformed JSON are refused',async()=>{assert.equal((await call(env(),req({subject:'x'.repeat(3000),audience:'jusspay-workforce'}))).status,413);assert.equal((await call(env(),new Request('https://workforce-access.internal/verify',{method:'POST',body:'{' }))).status,400);});
