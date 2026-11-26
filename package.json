@@ -5,7 +5,7 @@
   "name": "jusspay",
   "private": true,
   "scripts": {
-    "check": "node --check src/worker.mjs && node --check src/auth-supabase.mjs && node --check src/subscriptions.mjs && node --check src/jbh-orders.mjs && node --check src/jbh-vendor-adapters.mjs && node --check test/jbh-orders.test.mjs && node --check test/auth.test.mjs && node --check test/security.test.mjs && node --check test/subscriptions.test.mjs && node --check test/orders.test.mjs && node --check monetization/src/worker.mjs && node --check scripts/stamp-release.mjs",
+    "check": "node --check src/merchant-registry.mjs && node --check src/worker.mjs && node --check src/auth-supabase.mjs && node --check src/subscriptions.mjs && node --check src/jbh-orders.mjs && node --check src/jbh-vendor-adapters.mjs && node --check test/merchant-registry.test.mjs && node --check test/jbh-orders.test.mjs && node --check test/auth.test.mjs && node --check test/security.test.mjs && node --check test/subscriptions.test.mjs && node --check test/orders.test.mjs && node --check monetization/src/worker.mjs && node --check scripts/stamp-release.mjs",
     "test": "node --test test/*.test.mjs monetization/test/*.test.mjs",
     "stamp:release": "node scripts/stamp-release.mjs"
   },
