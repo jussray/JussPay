@@ -12,6 +12,7 @@ import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs'
 import {JBH_LIVE_ACCOUNT_ID} from './merchant-registry.mjs';
 import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from './jbh-vendor-adapters.mjs';
 import {jbhConfigurationReview} from './jbh-preflight.mjs';
+import {buildPaymentLedgerEntry,appendPaymentLedgerEntry} from './payment-ledger.mjs';
 
 // Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
 // account ID and never shares the live order book.
@@ -307,8 +308,12 @@ export class JbhOrderBook{
       order={id,status:'pending',...priced,fingerprint,createdAt:Date.now(),sessionId:null,sessionUrl:null,paymentIntent:null};
       // The order and request mapping exist before the provider side effect, so a retry
       // reuses the same Stripe idempotency key and an unknown outcome stays reconcilable.
-      await storage.put(`order:${id}`,order);
-      await storage.put(`request:${requestId}`,id);
+      await storage.transaction(async txn=>{
+        await txn.put(`order:${id}`,order);
+        await txn.put(`request:${requestId}`,id);
+        const ledger=buildPaymentLedgerEntry({merchantId:'juss-ray-beauty-co',source:'jbh-orders',eventId:`checkout_${id}`,eventType:'checkout.session.created',orderId:id,status:'pending',amountMinor:priced.total,currency:priced.currency,mode:jbhLive(env)?'live':'sandbox',recordedAt:order.createdAt});
+        await appendPaymentLedgerEntry(txn,ledger);
+      });
     }
     const origin=env.JBH_STOREFRONT_ORIGIN;
     const form={mode:'payment',client_reference_id:id,'metadata[jbh_order_id]':id,'payment_intent_data[metadata][jbh_order_id]':id,
@@ -429,7 +434,13 @@ export class JbhOrderBook{
       const session=await jbhStripe(this.env,`checkout/sessions/${encodeURIComponent(order.sessionId)}`);
       if(!reconcileSession(session,order,jbhLive(this.env))){
         await this.receipt(orderId,'session_mismatch',{event:event.id,type:event.type});
-        await storage.put(`event:${event.id}`,{type:event.type,mismatch:true,processedAt:Date.now()});
+        await storage.transaction(async txn=>{
+          if(await txn.get(`event:${event.id}`))return;
+          const at=Date.now();
+          const ledger=buildPaymentLedgerEntry({merchantId:'juss-ray-beauty-co',source:'jbh-orders',eventId:event.id,eventType:event.type,orderId,status:'reconciliation_required',amountMinor:order.total,currency:order.currency,mode:jbhLive(this.env)?'live':'sandbox',paymentIntentId:order.paymentIntent||null,recordedAt:at});
+          await appendPaymentLedgerEntry(txn,ledger);
+          await txn.put(`event:${event.id}`,{type:event.type,mismatch:true,processedAt:at});
+        });
         return json({received:true,reconciliation_required:true});
       }
       if(['checkout.session.completed','checkout.session.async_payment_succeeded'].includes(event.type)){
@@ -471,7 +482,10 @@ export class JbhOrderBook{
         await txn.put(`queue:${orderId}`,orderId);
         await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:jbhLive(this.env),orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
       }
-      await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:Date.now(),...(reason?{note:reason}:{})});
+      const at=Date.now();
+      const ledger=buildPaymentLedgerEntry({merchantId:'juss-ray-beauty-co',source:'jbh-orders',eventId:event.id,eventType:event.type,orderId,status:next?.status||order.status,amountMinor:order.total,currency:order.currency,mode:jbhLive(this.env)?'live':'sandbox',paymentIntentId:next?.paymentIntent||pi||order.paymentIntent||null,recordedAt:at});
+      await appendPaymentLedgerEntry(txn,ledger);
+      await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:at,...(reason?{note:reason}:{})});
     });
     await this.forwardPrivateHold(orderId);
     await this.forwardPrivateReceipt(orderId);
