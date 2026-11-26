@@ -1,5 +1,6 @@
 import {createTestOrder,planEntitlement,orderStatus,checkoutTestSubscription,checkoutOneTimeOrder,orderWebhook,validatePurchase,testKey} from './subscriptions.mjs';
 import {JUSSCO_LIVE_ACCOUNT_ID} from './merchant-registry.mjs';
+import {buildPaymentLedgerEntry,appendPaymentLedgerEntry} from './payment-ledger.mjs';
 import {handleJbh,JbhOrderBook} from './jbh-orders.mjs';
 export {validatePurchase,JbhOrderBook};
 const ACCOUNT = JUSSCO_LIVE_ACCOUNT_ID;
@@ -14,6 +15,32 @@ export function stripeConfiguration(env){
 const EVENTS = new Set(['checkout.session.completed','checkout.session.async_payment_succeeded','customer.subscription.created','customer.subscription.updated','customer.subscription.deleted','invoice.paid','invoice.payment_failed','charge.refunded','charge.dispute.created']);
 export const json = (value,status=200) => new Response(JSON.stringify(value),{status,headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff','x-robots-tag':'noindex'}});
 export const fail = (status,code) => { throw Object.assign(new Error(code),{status}); };
+function portfolioLedgerEntry(event,subscription,details,env){
+  const object=event.data?.object||{};
+  let referenceId=subscription,referenceType='subscription';
+  if(!referenceId&&event.type==='charge.refunded'){referenceId=object.id;referenceType='charge';}
+  if(!referenceId&&event.type==='charge.dispute.created'){
+    const charge=object.charge;referenceId=typeof charge==='string'?charge:charge?.id;referenceType='charge';
+  }
+  let amountMinor;
+  if(event.type==='invoice.paid')amountMinor=object.amount_paid;
+  else if(event.type==='invoice.payment_failed')amountMinor=object.amount_due;
+  else if(event.type==='charge.refunded')amountMinor=object.amount_refunded;
+  else if(event.type==='charge.dispute.created')amountMinor=object.amount;
+  else if(event.type.startsWith('checkout.session.'))amountMinor=object.amount_total;
+  else amountMinor=details?.amountMinor;
+  const currency=object.currency||details?.currency;
+  if(typeof referenceId!=='string'||!Number.isSafeInteger(amountMinor)||typeof currency!=='string')fail(502,'ledger_event_incomplete');
+  const providerStatus=details?.status;
+  let status='pending';
+  if(event.type==='invoice.payment_failed'||['past_due','unpaid','incomplete'].includes(providerStatus))status='payment_failed';
+  else if(event.type==='charge.refunded')status='refunded';
+  else if(event.type==='charge.dispute.created')status='disputed';
+  else if(event.type==='customer.subscription.deleted'||['canceled','incomplete_expired'].includes(providerStatus))status='expired';
+  else if(event.type==='invoice.paid'||details?.row?.active)status='paid';
+  const paymentIntent=typeof object.payment_intent==='string'?object.payment_intent:object.payment_intent?.id||null;
+  return buildPaymentLedgerEntry({merchantId:'jussco',source:'portfolio-billing',eventId:event.id,eventType:event.type,referenceType,orderId:referenceId,status,amountMinor,currency,mode:env.STRIPE_LIVE==='true'?'live':'sandbox',paymentIntentId:paymentIntent,recordedAt:Date.now()});
+}
 const enc = new TextEncoder();
 export async function digest(value){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 export async function verifySignature(raw,header,secret,now=Math.floor(Date.now()/1000)){
@@ -197,7 +224,7 @@ export class BillingAccount {
     const product=s.metadata?.jusspay_product;let catalog={};try{catalog=plans(this.env);}catch{}const p=Object.hasOwn(catalog,product)?catalog[product]:null;
     const items=s.items?.data || [];const item=items.length===1?items[0]:null;
     const until=item?.current_period_end || s.current_period_end || 0;
-    return {status:s.status,row:{product:product||null,priceId:item?.price?.id||null,active:Boolean(p && s.status==='active' && item?.price?.id===p.priceId && item.quantity===1 && until>Date.now()/1000),entitlements:p?.entitlements||[],until}};
+    return {status:s.status,amountMinor:item?.price?.unit_amount,currency:item?.price?.currency,row:{product:product||null,priceId:item?.price?.id||null,active:Boolean(p && s.status==='active' && item?.price?.id===p.priceId && item.quantity===1 && until>Date.now()/1000),entitlements:p?.entitlements||[],until}};
   }
   orderStore(){
     const storage=this.state.storage;
@@ -252,17 +279,19 @@ export class BillingAccount {
     if(event.type.startsWith('customer.subscription.'))subscription=o.id;
     else if(event.type.startsWith('checkout.session.'))subscription=typeof o.subscription==='string'?o.subscription:o.subscription?.id;
     else if(event.type.startsWith('invoice.'))subscription=o.parent?.subscription_details?.subscription || o.subscription;
-    let row;
+    let row,subscriptionDetails;
     if(subscription){
       // Fetch inside serialized account object; old deliveries cannot overwrite a newer snapshot.
-      ({row}=await this.subscriptionRow(subscription,customerId,subject));
+      subscriptionDetails=await this.subscriptionRow(subscription,customerId,subject);row=subscriptionDetails.row;
     }else if(!['charge.refunded','charge.dispute.created'].includes(event.type))fail(400,'missing_subscription');
+    const ledgerEntry=portfolioLedgerEntry(event,subscription,subscriptionDetails,this.env);
     await this.state.storage.transaction(async txn=>{
       if(await txn.get(`event:${event.id}`))return;
       await txn.put('customer',customerId);
       // Conservative account-wide suspension requires founder review; renewals cannot undo refunds/disputes.
       if(['charge.refunded','charge.dispute.created'].includes(event.type))await txn.put('suspended',{event:event.id,reason:event.type});
       if(row)await txn.put(`subscription:${subscription}`,row);
+      await appendPaymentLedgerEntry(txn,ledgerEntry);
       await txn.put(`event:${event.id}`,{type:event.type,processedAt:Date.now()});
     });
     return json({received:true});
