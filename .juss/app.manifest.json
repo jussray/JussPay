@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "1.0",
+  "registryVersion": "2.0.0",
+  "id": "juss-pay",
+  "name": "JussPay",
+  "repository": "JussPay",
+  "defaultBranch": "main",
+  "sourceHeadAtAudit": "c1b6ad1011ad3cf5fa5df011a4af25d335f4b6e1",
+  "identityStatus": "source-verified",
+  "role": "payment-routing-and-entitlement-infrastructure",
+  "authorityOwner": "juss-pay",
+  "authorityScope": "Payment orchestration is not activated; test-mode constraints apply; no live charges, fund pooling, or production activation are authorized.",
+  "surfaces": [
+    "worker",
+    "api"
+  ],
+  "localManifestPaths": [
+    ".juss/app.manifest.json",
+    ".juss/skills.manifest.json"
+  ]
+}
