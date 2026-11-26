@@ -34,6 +34,12 @@ export function plans(env){
   if(!values || Array.isArray(values) || typeof values!=='object') fail(503,'invalid_catalog');
   for(const [product,p] of Object.entries(values)){
     if(!Object.hasOwn(PRODUCTS,product) || p.approved!==true || !/^price_[a-zA-Z0-9]+$/.test(p.priceId || '') || !Array.isArray(p.entitlements) || !p.entitlements.length || p.entitlements.some(x=>typeof x!=='string'||!x.length||x.length>100) || !Number.isSafeInteger(p.unitAmount) || p.unitAmount<1 || !/^[a-z]{3}$/.test(p.currency || '') || !['month','year'].includes(p.interval) || typeof p.termsUrl!=='string' || !p.termsUrl.startsWith('https://')) fail(503,'unapproved_catalog');
+    if(p.intro!==undefined && (
+      typeof p.intro!=='object' || p.intro===null || Array.isArray(p.intro) ||
+      p.intro.approved!==true || p.intro.firstInvoiceAmountMinor!==100 ||
+      p.currency!=='usd' || p.interval!=='month' || p.unitAmount<=100 ||
+      !/^coupon_[A-Za-z0-9_]+$/.test(p.intro.couponId||'') ||
+      p.intro.renewalConsentRequired!==true)) fail(503,'unapproved_intro_offer');
   }
   return values;
 }
@@ -82,7 +88,21 @@ export default {async fetch(request,env){try{
     return json({service:'JussPay',configured,livePaymentsVerified:false},configured?200:503);
   }
   if(url.pathname==='/catalog' && request.method==='GET'){
-    const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({id,name,purchaseStatus:operational&&catalog[id]?'requires_provider_validation':'unavailable',providerAvailabilityVerified:false,offerConfigured:Boolean(catalog[id]),...(catalog[id]?{unitAmount:catalog[id].unitAmount,currency:catalog[id].currency,interval:catalog[id].interval,termsUrl:catalog[id].termsUrl,entitlements:catalog[id].entitlements}:{})})));
+    const catalog=plans(env);let operational=true;try{ready(env);if(env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');}catch{operational=false;}return json(Object.entries(PRODUCTS).map(([id,name])=>({
+      id,name,
+      purchaseStatus:operational&&env.PAYMENTS_ENABLED==='true'&&catalog[id]&&
+        (id!=='promptos'||catalog[id].intro)&&
+        (!catalog[id].intro||(env.INTRODUCTORY_OFFERS_ENABLED==='true'&&env.STRIPE_LIVE==='false'))
+        ?'requires_provider_validation':'unavailable',
+      providerAvailabilityVerified:false,offerConfigured:Boolean(catalog[id]),
+      ...(catalog[id]?{unitAmount:catalog[id].unitAmount,currency:catalog[id].currency,
+        interval:catalog[id].interval,termsUrl:catalog[id].termsUrl,
+        entitlements:catalog[id].entitlements,
+        ...(catalog[id].intro?{introOffer:{firstInvoiceAmountMinor:100,
+          renewalAmountMinor:catalog[id].unitAmount,renewalInterval:'month',
+          billingMode:env.STRIPE_LIVE==='false'?'test':env.STRIPE_LIVE==='true'?'live':'unknown',
+          approved:catalog[id].intro.approved}}:{})}:{})
+    })));
   }
   // JBH hair orders: own gate, keys, account and Durable Object (src/jbh-orders.mjs).
   if(url.pathname.startsWith('/jbh/'))return await handleJbh(request,env);
@@ -124,7 +144,7 @@ export default {async fetch(request,env){try{
   // No ambient cookies, no CORS: app servers call this with a visitor-scoped token.
   const subject=await identity(request,env);
   let input={};if(request.method==='POST'){const text=await boundedText(request,4096);try{input=JSON.parse(text);if(!input || Array.isArray(input) || typeof input!=='object')fail(400,'invalid_json');}catch{fail(400,'invalid_json');}}
-  return routeUser(env,subject,url.pathname,{product:input.product});
+  return routeUser(env,subject,url.pathname,{product:input.product,introConsent:input.introConsent});
 }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}}};
 
 export class BillingAccount {
@@ -144,6 +164,17 @@ export class BillingAccount {
     if(path==='/checkout'&&!selectedPlan)fail(409,'product_not_available');
     if(path==='/checkout'&&this.env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');
     if(path==='/checkout'&&await this.state.storage.get('suspended'))fail(409,'billing_account_suspended');
+    // A promised $1 first month must never silently turn into regular-price checkout.
+    if(path==='/checkout'&&!selectedPlan.intro&&(input.introConsent!==undefined||
+      (input.product==='promptos'&&(this.env.INTRODUCTORY_OFFERS_ENABLED==='true'||this.env.STRIPE_LIVE==='true'))))fail(503,'introductory_offer_required');
+    if(path==='/checkout'&&selectedPlan.intro){
+      const p=selectedPlan,c=input.introConsent;
+      if(this.env.INTRODUCTORY_OFFERS_ENABLED!=='true'||this.env.STRIPE_LIVE!=='false')fail(503,'introductory_offer_disabled');
+      if(!c || c.acceptsTerms!==true || c.acceptsAutomaticRenewal!==true ||
+         c.firstInvoiceAmountMinor!==100 || c.renewalAmountMinor!==p.unitAmount ||
+         c.interval!=='month' || c.termsUrl!==p.termsUrl)fail(409,'renewal_consent_required');
+      if(await this.state.storage.get(`introRedeemed:${input.product}`))fail(409,'introductory_offer_already_redeemed');
+    }
     await account(this.env,path==='/checkout');
     let customer=await this.state.storage.get('customer');
     if(!customer){
@@ -158,7 +189,19 @@ export class BillingAccount {
     const rights=await this.readEntitlements();if(rights.some(x=>x.product===input.product))fail(409,'already_subscribed');
     const price=await stripe(this.env,`prices/${encodeURIComponent(p.priceId)}?expand%5B%5D=product`);
     if(!price.product?.active || price.product.livemode!==(this.env.STRIPE_LIVE==='true') || price.product?.id!==stripeConfiguration(this.env).products[input.product] || !price.active || price.livemode!==(this.env.STRIPE_LIVE==='true') || price.unit_amount!==p.unitAmount || price.currency!==p.currency || price.recurring?.interval!==p.interval || price.recurring?.interval_count!==1 || price.recurring?.usage_type==='metered')fail(503,'price_configuration_mismatch');
-    const fingerprint=await digest(JSON.stringify([p.priceId,p.unitAmount,p.currency,p.interval,p.entitlements,p.termsUrl,this.env.APP_ORIGIN]));
+    let coupon=null;
+    if(p.intro){
+      // Stripe prices and discounts are provider-owned; never accept IDs or amounts from the client.
+      coupon=await stripe(this.env,`coupons/${encodeURIComponent(p.intro.couponId)}`);
+      const allowedProducts=coupon.applies_to?.products;
+      if(coupon.id!==p.intro.couponId || coupon.valid!==true ||
+         coupon.livemode!==false || coupon.duration!=='once' ||
+         coupon.currency!=='usd' || coupon.amount_off!==p.unitAmount-100 ||
+         coupon.percent_off!=null ||
+         !Array.isArray(allowedProducts)||!allowedProducts.includes(price.product.id))
+         fail(503,'introductory_discount_mismatch');
+    }
+    const fingerprint=await digest(JSON.stringify([p.priceId,p.unitAmount,p.currency,p.interval,p.entitlements,p.termsUrl,this.env.APP_ORIGIN,...(p.intro?[p.intro]:[])]));
     let attempt=await this.state.storage.get(`checkout:${input.product}`);
     // Upgrade any pre-release string receipt to an explicit attempt record.
     if(typeof attempt==='string')attempt={id:attempt};
@@ -167,7 +210,14 @@ export class BillingAccount {
       const session=await stripe(this.env,`checkout/sessions/${encodeURIComponent(attempt.id)}`);
       if(session.customer!==customer)fail(403,'checkout_identity_mismatch');
       if(session.status==='open'){
-        if(attempt.fingerprint===fingerprint)return json({url:session.url});
+        if(attempt.fingerprint===fingerprint){
+          if(p.intro&&(session.mode!=='subscription'||session.livemode!==false||
+              session.amount_total!==100||typeof session.url!=='string'||
+              !session.url.startsWith('https://checkout.stripe.com/')))
+            fail(503,'introductory_checkout_total_mismatch');
+          return json({url:session.url,...(p.intro?{billingMode:'test',firstInvoiceAmountMinor:100,
+            renewalAmountMinor:p.unitAmount,currency:'usd',interval:'month',termsUrl:p.termsUrl}:{})});
+        }
         await stripe(this.env,`checkout/sessions/${encodeURIComponent(attempt.id)}/expire`,'POST',{},`expire-${attempt.key||attempt.id}`);
       }
       if(session.status==='complete'){
@@ -182,8 +232,36 @@ export class BillingAccount {
       attempt=null;
     }
     if(!attempt){attempt={key:crypto.randomUUID(),fingerprint,createdAt:Date.now()};await this.state.storage.put(`checkout:${input.product}`,attempt);}
-    const s=await stripe(this.env,'checkout/sessions','POST',{mode:'subscription',customer,'line_items[0][price]':p.priceId,'line_items[0][quantity]':'1',success_url:`${this.env.APP_ORIGIN}/account?checkout=processing`,cancel_url:`${this.env.APP_ORIGIN}/account?checkout=cancelled`,'client_reference_id':input.subject,'metadata[jusspay_product]':input.product,'subscription_data[metadata][jusspay_subject]':input.subject,'subscription_data[metadata][jusspay_product]':input.product},`checkout-${await digest(`${input.subject}:${input.product}:${attempt.key}`)}`);
-    await this.state.storage.put(`checkout:${input.product}`,{...attempt,id:s.id});return json({url:s.url});
+    const sessionForm={mode:'subscription',customer,
+      'line_items[0][price]':p.priceId,'line_items[0][quantity]':'1',
+      success_url:`${this.env.APP_ORIGIN}/account?checkout=processing`,
+      cancel_url:`${this.env.APP_ORIGIN}/account?checkout=cancelled`,
+      client_reference_id:input.subject,'metadata[jusspay_product]':input.product,
+      'subscription_data[metadata][jusspay_subject]':input.subject,
+      'subscription_data[metadata][jusspay_product]':input.product};
+    if(p.intro){
+      sessionForm['discounts[0][coupon]']=coupon.id;
+      sessionForm['metadata[jusspay_intro]']='usd_100_first_month_v1';
+      sessionForm['subscription_data[metadata][jusspay_intro]']='usd_100_first_month_v1';
+    }
+    const s=await stripe(this.env,'checkout/sessions','POST',sessionForm,
+      `checkout-${await digest(`${input.subject}:${input.product}:${attempt.key}`)}`);
+    if(p.intro && (s.mode!=='subscription'||s.livemode!==false||
+       s.amount_total!==100||typeof s.url!=='string'||!s.url.startsWith('https://checkout.stripe.com/')))
+       fail(503,'introductory_checkout_total_mismatch');
+    if(p.intro){
+      // Consent receipt and session identity must be recorded together.
+      await this.state.storage.transaction(async txn=>{
+        await txn.put(`checkout:${input.product}`,{...attempt,id:s.id});
+        await txn.put(`introConsent:${input.product}`,{
+          session:s.id,customer,priceId:p.priceId,
+          firstInvoiceAmountMinor:100,renewalAmountMinor:p.unitAmount,
+          currency:'usd',interval:'month',termsUrl:p.termsUrl,capturedAt:Date.now()
+        });
+      });
+    }else await this.state.storage.put(`checkout:${input.product}`,{...attempt,id:s.id});
+    return json({url:s.url,...(p.intro?{billingMode:'test',firstInvoiceAmountMinor:100,renewalAmountMinor:p.unitAmount,
+      currency:'usd',interval:'month',termsUrl:p.termsUrl}: {})});
   }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}}
   async readEntitlements(){
     if(await this.state.storage.get('suspended'))return [];
@@ -196,7 +274,44 @@ export class BillingAccount {
     const product=s.metadata?.jusspay_product;let catalog={};try{catalog=plans(this.env);}catch{}const p=Object.hasOwn(catalog,product)?catalog[product]:null;
     const items=s.items?.data || [];const item=items.length===1?items[0]:null;
     const until=item?.current_period_end || s.current_period_end || 0;
-    return {status:s.status,row:{product:product||null,priceId:item?.price?.id||null,active:Boolean(p && s.status==='active' && item?.price?.id===p.priceId && item.quantity===1 && until>Date.now()/1000),entitlements:p?.entitlements||[],until}};
+    let introVerified=true;
+    if(p?.intro){
+      introVerified=false;
+      if(s.status==='active'&&item?.price?.id===p.priceId&&item.quantity===1&&until>Date.now()/1000){
+      const receiptKey=`introVerified:${subscription}`;
+      const existing=await this.state.storage.get(receiptKey);
+      if(existing?.customer===customerId && existing.priceId===p.priceId &&
+         existing.couponId===p.intro.couponId && existing.amountPaid===100){
+        introVerified=true;
+      }else{
+        // First successful invoice is the only acceptable proof of the initial $1.
+        // Later renewals may use the previously stored, provider-verified receipt.
+        const invoiceId=typeof s.latest_invoice==='string'?s.latest_invoice:s.latest_invoice?.id;
+        if(/^in_[A-Za-z0-9_]+$/.test(invoiceId||'')){
+          const invoice=await stripe(this.env,`invoices/${encodeURIComponent(invoiceId)}`);
+          const invSub=typeof invoice.subscription==='string'?invoice.subscription:
+            invoice.parent?.subscription_details?.subscription;
+          const lines=invoice.lines?.data||[];
+          const invLine=lines.length===1?lines[0]:null;
+          const linePrice=invLine?.price?.id||invLine?.pricing?.price_details?.price;
+          if(invoice.id===invoiceId&&invoice.customer===customerId&&invSub===subscription&&
+             invoice.livemode===false&&invoice.status==='paid'&&
+             invoice.billing_reason==='subscription_create'&&invoice.currency==='usd'&&
+             invoice.total===100&&invoice.amount_paid===100&&invoice.amount_remaining===0&&
+             invoice.lines?.has_more===false&&lines.length===1&&invLine.quantity===1&&linePrice===p.priceId&&
+             s.metadata?.jusspay_intro==='usd_100_first_month_v1'){
+            await this.state.storage.put(receiptKey,{customer:customerId,priceId:p.priceId,
+              couponId:p.intro.couponId,amountPaid:100,invoiceId});
+            await this.state.storage.put(`introRedeemed:${product}`,{subscription,invoiceId});
+            introVerified=true;
+          }
+        }
+      }
+      }
+    }
+    return {status:s.status,row:{product:product||null,priceId:item?.price?.id||null,
+      active:Boolean(p && introVerified && s.status==='active' && item?.price?.id===p.priceId &&
+        item.quantity===1 && until>Date.now()/1000),entitlements:p?.entitlements||[],until}};
   }
   orderStore(){
     const storage=this.state.storage;

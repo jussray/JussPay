@@ -3,5 +3,8 @@
   "main": "src/auth-supabase.mjs",
   "compatibility_date": "2026-11-05",
   "workers_dev": false,
-  "preview_urls": false
+  "preview_urls": false,
+  "vars": {
+    "PROMPTOS_GOOGLE_CLIENT_ID": "813638397474-6pibutsimcafimrcttq7idnmugsin01c.apps.googleusercontent.com"
+  }
 }

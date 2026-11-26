@@ -47,7 +47,8 @@
     "JBH_STRIPE_LIVE": "true",
     "JBH_LIVE_CHARGES_APPROVED": "false",
     "JBH_STOREFRONT_ORIGIN": "https://jussbeautifulhair.com",
-    "RELEASE_SHA": "f8872857fc6f020580d0a3b71b02a9b5d45c6ece"
+    "RELEASE_SHA": "f8872857fc6f020580d0a3b71b02a9b5d45c6ece",
+    "INTRODUCTORY_OFFERS_ENABLED": "false"
   },
   "previews": {
     "vars": {
@@ -60,7 +61,8 @@
       "JBH_LIVE_CHARGES_APPROVED": "false",
       "JBH_PRIVATE_RECEIPTS_ENABLED": "false",
       "JBH_STOREFRONT_ORIGIN": "https://preview.invalid",
-      "RELEASE_SHA": "preview-not-production"
+      "RELEASE_SHA": "preview-not-production",
+      "INTRODUCTORY_OFFERS_ENABLED": "false"
     },
     "durable_objects": {
       "bindings": [
