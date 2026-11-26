@@ -10,6 +10,9 @@ import {memoryStorage} from './harness.mjs';
 const STOREFRONT_KEY='sf_'+'a'.repeat(40);
 const OWNER_KEY='ow_'+'b'.repeat(40);
 const WEBHOOK_SECRET='whsec_jbh_local';
+const TEST_PAYMENT_INTENT='pi_000000000000000000000001';
+const LIVE_PAYMENT_INTENT='pi_000000000000000000000002';
+const stripeEventId=id=>`evt_${String(id).replace(/^evt_/,'').replace(/[^A-Za-z0-9]/g,'').padEnd(24,'0').slice(0,24)}`;
 const CATALOG={
   'BRAZ-SEW-BW-10-12-14':{approved:true,name:'Body Wave Human Hair Bundle Deal 10/12/14',unitAmount:18900,currency:'usd',vendor:'dropship-beauty'},
   'BRAZ-TRANS-CLO-DW-12':{approved:true,name:'Deep Wave 4x4 Transparent Lace Closure 12',unitAmount:6900,currency:'usd',vendor:'dropship-beauty'},
@@ -19,7 +22,7 @@ const CATALOG={
 function jbhEnv(overrides={}){
   const calls=[];
   const sessions=new Map(),byKey=new Map(),intents=new Map();
-  const charge={id:'ch_1',payment_intent:'pi_test_1',refunded:true};
+  const charge={id:'ch_1',payment_intent:TEST_PAYMENT_INTENT,refunded:true};
   const env={
     JBH_ORDERS_ENABLED:'true',JBH_STRIPE_LIVE:'false',JBH_STRIPE_SECRET_KEY:'sk_test_FAKE',JBH_STRIPE_WEBHOOK_SECRET:WEBHOOK_SECRET,
     JBH_STRIPE_API_VERSION:'test-only',JBH_TEST_ACCOUNT_ID:'acct_1TestJbhSandbox',JBH_STOREFRONT_KEY:STOREFRONT_KEY,JBH_OWNER_KEY:OWNER_KEY,
@@ -31,14 +34,15 @@ function jbhEnv(overrides={}){
       if(u==='checkout/sessions'&&init.method==='POST'){
         const k=init.headers['Idempotency-Key'];if(byKey.has(k))return Response.json(sessions.get(byKey.get(k)));
         const b=Object.fromEntries(init.body);const live=env.JBH_STRIPE_LIVE==='true';const id=`cs_${live?'live':'test'}_${sessions.size+1}`;byKey.set(k,id);
-        intents.set(`pi_${live?'live':'test'}_${sessions.size+1}`,{id:`pi_${live?'live':'test'}_${sessions.size+1}`,livemode:live,metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
+        const paymentIntentId=live?LIVE_PAYMENT_INTENT:TEST_PAYMENT_INTENT;
+        intents.set(paymentIntentId,{id:paymentIntentId,livemode:live,metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
         let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++)subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(b[`line_items[${i}][price_data][unit_amount]`]);
         const shipping=Number(b['shipping_options[0][shipping_rate_data][fixed_amount][amount]']);
         sessions.set(id,{id,object:'checkout.session',mode:'payment',livemode:live,currency:'usd',client_reference_id:b.client_reference_id,metadata:{jbh_order_id:b['metadata[jbh_order_id]']},amount_subtotal:subtotal,amount_total:subtotal+shipping,total_details:{amount_shipping:shipping},payment_status:'unpaid',status:'open',url:`https://checkout.stripe.com/c/pay/${id}`});
         return Response.json(sessions.get(id));
       }
       if(u.startsWith('checkout/sessions/'))return Response.json(sessions.get(decodeURIComponent(u.split('/')[2])));
-      if(u.startsWith('charges/'))return Response.json({...charge,payment_intent:env.JBH_STRIPE_LIVE==='true'?'pi_live_1':'pi_test_1',livemode:env.JBH_STRIPE_LIVE==='true'});
+      if(u.startsWith('charges/'))return Response.json({...charge,payment_intent:env.JBH_STRIPE_LIVE==='true'?LIVE_PAYMENT_INTENT:TEST_PAYMENT_INTENT,livemode:env.JBH_STRIPE_LIVE==='true'});
       if(u.startsWith('payment_intents/'))return intents.has(u.split('/')[1])?Response.json(intents.get(u.split('/')[1])):new Response('{}',{status:404});
       return new Response('{}',{status:404});
     },
@@ -54,7 +58,8 @@ const get=(path,headers={})=>new Request('https://pay.example'+path,{headers});
 const sf={'x-jbh-storefront-key':STOREFRONT_KEY};
 
 async function signed(event,secret=WEBHOOK_SECRET){
-  const raw=JSON.stringify(event),t=Math.floor(Date.now()/1000);
+  const payload={...event,id:stripeEventId(event.id)};
+  const raw=JSON.stringify(payload),t=Math.floor(Date.now()/1000);
   const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
   const sig=[...new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(`${t}.${raw}`)))].map(x=>x.toString(16).padStart(2,'0')).join('');
   return new Request('https://pay.example/jbh/webhook',{method:'POST',headers:{'stripe-signature':`t=${t},v1=${sig}`},body:raw});
@@ -67,7 +72,7 @@ async function paidOrder(h,items){
   assert.equal(r.status,200);
   const {orderId}=await r.json();
   const sessionId=[...h.sessions.keys()].at(-1);
-  Object.assign(h.sessions.get(sessionId),{payment_status:'paid',status:'complete',payment_intent:`pi_${h.env.JBH_STRIPE_LIVE==='true'?'live':'test'}_${sessionId.split('_').pop()}`,
+  Object.assign(h.sessions.get(sessionId),{payment_status:'paid',status:'complete',payment_intent:h.env.JBH_STRIPE_LIVE==='true'?LIVE_PAYMENT_INTENT:TEST_PAYMENT_INTENT,
     collected_information:{shipping_details:{name:'Test Buyer',address:{line1:'1 Test St',city:'Testville',state:'MD',postal_code:'21201',country:'US'}}},
     customer_details:{email:'buyer@example.test',phone:'+15555550100'}});
   return {orderId,sessionId};
