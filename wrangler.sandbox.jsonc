@@ -23,6 +23,7 @@
       "PAYMENTS_ENABLED": "false",
       "JBH_ORDERS_ENABLED": "false",
       "JBH_STRIPE_LIVE": "false",
+      "JBH_LIVE_CHARGES_APPROVED": "false",
       "JBH_TEST_ACCOUNT_ID": "acct_1TfbELRp7J40bCrl"
     },
     "durable_objects": {
@@ -37,6 +38,7 @@
     "PAYMENTS_ENABLED": "false",
     "APPROVED_PLANS": "{}",
     "JBH_STRIPE_LIVE": "false",
+    "JBH_LIVE_CHARGES_APPROVED": "false",
     "JBH_ORDERS_ENABLED": "true",
     "JBH_STRIPE_API_VERSION": "2026-11-18.endive",
     "JBH_TEST_ACCOUNT_ID": "acct_1TfbELRp7J40bCrl"
