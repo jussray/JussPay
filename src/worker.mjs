@@ -37,7 +37,7 @@ function portfolioLedgerEntry(event,subscription,details,env){
   else if(event.type==='charge.refunded')status='refunded';
   else if(event.type==='charge.dispute.created')status='disputed';
   else if(event.type==='customer.subscription.deleted'||['canceled','incomplete_expired'].includes(providerStatus))status='expired';
-  else if(event.type==='invoice.paid'||details?.row?.active)status='paid';
+  else if(event.type==='invoice.paid'||details?.status==='active')status='paid';
   const paymentIntent=typeof object.payment_intent==='string'?object.payment_intent:object.payment_intent?.id||null;
   return buildPaymentLedgerEntry({merchantId:'jussco',source:'portfolio-billing',eventId:event.id,eventType:event.type,referenceType,orderId:referenceId,status,amountMinor,currency,mode:env.STRIPE_LIVE==='true'?'live':'sandbox',paymentIntentId:paymentIntent,recordedAt:Date.now()});
 }
