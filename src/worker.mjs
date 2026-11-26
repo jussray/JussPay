@@ -40,10 +40,20 @@ export function plans(env){
       p.currency!=='usd' || p.interval!=='month' || p.unitAmount<=100 ||
       !/^coupon_[A-Za-z0-9_]+$/.test(p.intro.couponId||'') ||
       p.intro.renewalConsentRequired!==true)) fail(503,'unapproved_intro_offer');
+    if(p.intro?.tax!==undefined && (!p.intro.tax || p.intro.tax.behavior!=='inclusive' ||
+      !/^txcd_[0-9]{8}$/.test(p.intro.tax.productCode||''))) fail(503,'unapproved_intro_tax');
   }
   return values;
 }
 function ready(env,webhook=false){stripeConfiguration(env);if(!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET || !env.STRIPE_API_VERSION || !env.BILLING || !['true','false'].includes(env.STRIPE_LIVE))fail(503,'billing_not_configured');if(!webhook&&(!env.AUTH || !env.APP_ORIGIN || !env.APP_ORIGIN.startsWith('https://') || new URL(env.APP_ORIGIN).origin!==env.APP_ORIGIN)) fail(503,'billing_not_configured');}
+function validIntroCheckout(session,plan){
+  return session.mode==='subscription' && session.livemode===false &&
+    session.amount_total===100 && typeof session.url==='string' &&
+    session.url.startsWith('https://checkout.stripe.com/') &&
+    (!plan.intro.tax || (session.automatic_tax?.enabled===true &&
+      session.billing_address_collection==='required' &&
+      session.automatic_tax.status!=='failed'));
+}
 export async function stripe(env,path,method='GET',data,key){
   const headers={'authorization':`Bearer ${env.STRIPE_SECRET_KEY}`,'Stripe-Version':env.STRIPE_API_VERSION};
   if(key) headers['Idempotency-Key']=key;
@@ -189,10 +199,13 @@ export class BillingAccount {
     const rights=await this.readEntitlements();if(rights.some(x=>x.product===input.product))fail(409,'already_subscribed');
     const price=await stripe(this.env,`prices/${encodeURIComponent(p.priceId)}?expand%5B%5D=product`);
     if(!price.product?.active || price.product.livemode!==(this.env.STRIPE_LIVE==='true') || price.product?.id!==stripeConfiguration(this.env).products[input.product] || !price.active || price.livemode!==(this.env.STRIPE_LIVE==='true') || price.unit_amount!==p.unitAmount || price.currency!==p.currency || price.recurring?.interval!==p.interval || price.recurring?.interval_count!==1 || price.recurring?.usage_type==='metered')fail(503,'price_configuration_mismatch');
+    const introTax=p.intro?.tax;
+    if(introTax && (price.tax_behavior!==introTax.behavior ||
+       price.product.tax_code!==introTax.productCode)) fail(503,'introductory_tax_configuration_mismatch');
     let coupon=null;
     if(p.intro){
       // Stripe prices and discounts are provider-owned; never accept IDs or amounts from the client.
-      coupon=await stripe(this.env,`coupons/${encodeURIComponent(p.intro.couponId)}`);
+      coupon=await stripe(this.env,`coupons/${encodeURIComponent(p.intro.couponId)}?expand%5B%5D=applies_to`);
       const allowedProducts=coupon.applies_to?.products;
       if(coupon.id!==p.intro.couponId || coupon.valid!==true ||
          coupon.livemode!==false || coupon.duration!=='once' ||
@@ -211,9 +224,7 @@ export class BillingAccount {
       if(session.customer!==customer)fail(403,'checkout_identity_mismatch');
       if(session.status==='open'){
         if(attempt.fingerprint===fingerprint){
-          if(p.intro&&(session.mode!=='subscription'||session.livemode!==false||
-              session.amount_total!==100||typeof session.url!=='string'||
-              !session.url.startsWith('https://checkout.stripe.com/')))
+          if(p.intro&&!validIntroCheckout(session,p))
             fail(503,'introductory_checkout_total_mismatch');
           return json({url:session.url,...(p.intro?{billingMode:'test',firstInvoiceAmountMinor:100,
             renewalAmountMinor:p.unitAmount,currency:'usd',interval:'month',termsUrl:p.termsUrl}:{})});
@@ -244,10 +255,14 @@ export class BillingAccount {
       sessionForm['metadata[jusspay_intro]']='usd_100_first_month_v1';
       sessionForm['subscription_data[metadata][jusspay_intro]']='usd_100_first_month_v1';
     }
+    if(introTax){
+      sessionForm['automatic_tax[enabled]']='true';
+      sessionForm.billing_address_collection='required';
+      sessionForm['customer_update[address]']='auto';
+    }
     const s=await stripe(this.env,'checkout/sessions','POST',sessionForm,
       `checkout-${await digest(`${input.subject}:${input.product}:${attempt.key}`)}`);
-    if(p.intro && (s.mode!=='subscription'||s.livemode!==false||
-       s.amount_total!==100||typeof s.url!=='string'||!s.url.startsWith('https://checkout.stripe.com/')))
+    if(p.intro && !validIntroCheckout(s,p))
        fail(503,'introductory_checkout_total_mismatch');
     if(p.intro){
       // Consent receipt and session identity must be recorded together.
@@ -277,11 +292,13 @@ export class BillingAccount {
     let introVerified=true;
     if(p?.intro){
       introVerified=false;
-      if(s.status==='active'&&item?.price?.id===p.priceId&&item.quantity===1&&until>Date.now()/1000){
+      if(s.status==='active'&&item?.price?.id===p.priceId&&item.quantity===1&&until>Date.now()/1000 &&
+         (!p.intro.tax||s.automatic_tax?.enabled===true)){
       const receiptKey=`introVerified:${subscription}`;
       const existing=await this.state.storage.get(receiptKey);
       if(existing?.customer===customerId && existing.priceId===p.priceId &&
-         existing.couponId===p.intro.couponId && existing.amountPaid===100){
+         existing.couponId===p.intro.couponId && existing.amountPaid===100 &&
+         (!p.intro.tax||existing.taxCode===p.intro.tax.productCode)){
         introVerified=true;
       }else{
         // First successful invoice is the only acceptable proof of the initial $1.
@@ -298,10 +315,12 @@ export class BillingAccount {
              invoice.livemode===false&&invoice.status==='paid'&&
              invoice.billing_reason==='subscription_create'&&invoice.currency==='usd'&&
              invoice.total===100&&invoice.amount_paid===100&&invoice.amount_remaining===0&&
+             (!p.intro.tax||(invoice.automatic_tax?.enabled===true&&invoice.automatic_tax.status==='complete'))&&
              invoice.lines?.has_more===false&&lines.length===1&&invLine.quantity===1&&linePrice===p.priceId&&
              s.metadata?.jusspay_intro==='usd_100_first_month_v1'){
             await this.state.storage.put(receiptKey,{customer:customerId,priceId:p.priceId,
-              couponId:p.intro.couponId,amountPaid:100,invoiceId});
+              couponId:p.intro.couponId,amountPaid:100,invoiceId,
+              ...(p.intro.tax?{taxCode:p.intro.tax.productCode}:{})});
             await this.state.storage.put(`introRedeemed:${product}`,{subscription,invoiceId});
             introVerified=true;
           }
