@@ -12,7 +12,7 @@ const OWNER_KEY='ow_'+'b'.repeat(40);
 const WEBHOOK_SECRET='whsec_jbh_local';
 const TEST_PAYMENT_INTENT='pi_000000000000000000000001';
 const LIVE_PAYMENT_INTENT='pi_000000000000000000000002';
-const stripeEventId=id=>`evt_${String(id).replace(/^evt_/,'').replace(/[^A-Za-z0-9]/g,'').padEnd(24,'0').slice(0,24)}`;
+const stripeEventId=id=>`evt_${String(id).replace(/^evt_/,'').replace(/[^A-Za-z0-9_-]/g,'').padEnd(24,'0').slice(0,24)}`;
 const CATALOG={
   'BRAZ-SEW-BW-10-12-14':{approved:true,name:'Body Wave Human Hair Bundle Deal 10/12/14',unitAmount:18900,currency:'usd',vendor:'dropship-beauty'},
   'BRAZ-TRANS-CLO-DW-12':{approved:true,name:'Deep Wave 4x4 Transparent Lace Closure 12',unitAmount:6900,currency:'usd',vendor:'dropship-beauty'},
@@ -408,7 +408,7 @@ test('private sandbox receipt is signed, retryable and sent only once after veri
   await worker.fetch(await signed(completed('evt_private_paid',sessionId)),h.env);
   assert.equal(deliveries.length,1);
   const receipt=JSON.parse(deliveries[0].raw);
-  assert.deepEqual(receipt,{eventId:'evt_private_paid',livemode:false,orderId,paymentIntentId:'pi_test_1',state:'awaiting_owner_dispatch'});
+  assert.deepEqual(receipt,{eventId:stripeEventId('evt_private_paid'),livemode:false,orderId,paymentIntentId:TEST_PAYMENT_INTENT,state:'awaiting_owner_dispatch'});
   assert.match(deliveries[0].signature,/^[0-9a-f]{64}$/);
   unavailable=false;
   await worker.fetch(await signed(completed('evt_private_paid',sessionId)),h.env);
