@@ -5,7 +5,7 @@
   "registry": {
     "repository": "jussray/promptos",
     "manifestPath": "manifests/apps/juss-pay.json",
-    "revision": "e8e16ba6c197dfbf5a36131d83a990effff20955",
+    "revision": "eaf8b831de197d97e40c52da885cee932b635f9e",
     "sourceRef": "feat/app-skill-registry-v2-20261125",
     "status": "candidate"
   },
@@ -173,6 +173,10 @@
   "plugins": [
     {
       "id": "github",
+      "kind": "chatgpt-plugin",
+      "canonicalPluginId": "plugin_connector_1p_1a69035c238881919c4190932b2df699",
+      "displayName": "GitHub",
+      "catalogStatus": "listed",
       "provider": "GitHub",
       "purpose": "Repository and CI evidence.",
       "mode": "operator-tooling",
@@ -193,6 +197,10 @@
     },
     {
       "id": "cloudflare",
+      "kind": "connector",
+      "canonicalPluginId": null,
+      "displayName": "Cloudflare",
+      "catalogStatus": "namespace-only",
       "provider": "Cloudflare",
       "purpose": "Worker and deployment metadata.",
       "mode": "operator-tooling",
@@ -212,6 +220,10 @@
     },
     {
       "id": "stripe",
+      "kind": "chatgpt-plugin",
+      "canonicalPluginId": "plugin_connector_690ab09fa43c8191bca40280e4563238",
+      "displayName": "Stripe",
+      "catalogStatus": "listed",
       "provider": "Stripe",
       "purpose": "Test-mode payment account, checkout, and webhook evidence only.",
       "mode": "operator-tooling",
