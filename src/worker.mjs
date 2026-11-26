@@ -165,7 +165,8 @@ export class BillingAccount {
     if(path==='/checkout'&&this.env.APPROVED_REFUND_POLICY!=='account_hold')fail(503,'refund_policy_not_approved');
     if(path==='/checkout'&&await this.state.storage.get('suspended'))fail(409,'billing_account_suspended');
     // A promised $1 first month must never silently turn into regular-price checkout.
-    if(path==='/checkout'&&input.product==='promptos'&&(this.env.INTRODUCTORY_OFFERS_ENABLED==='true'||this.env.STRIPE_LIVE==='true'||input.introConsent!==undefined)&&!selectedPlan.intro)fail(503,'introductory_offer_required');
+    if(path==='/checkout'&&!selectedPlan.intro&&(input.introConsent!==undefined||
+      (input.product==='promptos'&&(this.env.INTRODUCTORY_OFFERS_ENABLED==='true'||this.env.STRIPE_LIVE==='true'))))fail(503,'introductory_offer_required');
     if(path==='/checkout'&&selectedPlan.intro){
       const p=selectedPlan,c=input.introConsent;
       if(this.env.INTRODUCTORY_OFFERS_ENABLED!=='true'||this.env.STRIPE_LIVE!=='false')fail(503,'introductory_offer_disabled');
