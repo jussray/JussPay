@@ -28,8 +28,9 @@ test('sandbox pins the verified Beauty Co account identity in test mode only', (
   assert.ok(previewVars.includes(account));
   assert.ok(runtimeVars.includes(account));
   assert.doesNotMatch(config, /sk_(?:test|live)_/);
-  assert.match(runtimeVars, /"JBH_ORDERS_ENABLED"\s*:\s*"false"/);
+  assert.match(runtimeVars, /"JBH_ORDERS_ENABLED"\s*:\s*"true"/);
   assert.match(runtimeVars, /"JBH_STRIPE_LIVE"\s*:\s*"false"/);
+  assert.match(runtimeVars, /"JBH_LIVE_CHARGES_APPROVED"\s*:\s*"false"/);
 });
 
 test('preview Durable Objects are bound to isolated sandbox namespaces', () => {
