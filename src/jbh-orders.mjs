@@ -9,12 +9,13 @@
 // written to the owner's fulfillment queue grouped by vendor with status
 // awaiting_owner_dispatch. Nothing here contacts, pays or orders from a vendor.
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
+import {JBH_LIVE_ACCOUNT_ID} from './merchant-registry.mjs';
 import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from './jbh-vendor-adapters.mjs';
 import {jbhConfigurationReview} from './jbh-preflight.mjs';
 
 // Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
 // account ID and never shares the live order book.
-export const JBH_LIVE_ACCOUNT='acct_1TfbELRp7J40bCrl';
+export const JBH_LIVE_ACCOUNT=JBH_LIVE_ACCOUNT_ID;
 export const JBH_EVENTS=new Set(['checkout.session.completed','checkout.session.async_payment_succeeded','checkout.session.async_payment_failed','checkout.session.expired','charge.refunded','charge.dispute.created']);
 const MAX_LINES=10,MAX_QTY=10;
 const REQUEST_ID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
