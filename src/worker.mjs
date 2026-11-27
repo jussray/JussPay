@@ -1,5 +1,6 @@
 import {createTestOrder,planEntitlement,orderStatus,checkoutTestSubscription,checkoutOneTimeOrder,orderWebhook,validatePurchase,testKey} from './subscriptions.mjs';
 import {handleJbh,JbhOrderBook} from './jbh-orders.mjs';
+import {handleTruthWeaverProof} from './truthweaver-proof.mjs';
 export {validatePurchase,JbhOrderBook};
 const ACCOUNT = 'acct_1U4xNyRs4gw4sfJH';
 export const PRODUCTS = Object.freeze({promptos:'PromptOS',chief:'Chief',thinktank:'Think Tank',sol:'SolContinuity',fcr:'Founder Control Room'});
@@ -104,6 +105,7 @@ export default {async fetch(request,env){try{
           approved:catalog[id].intro.approved}}:{})}:{})
     })));
   }
+  if(url.pathname==='/truthweaver/verify-paid')return await handleTruthWeaverProof(request,env);
   // JBH hair orders: own gate, keys, account and Durable Object (src/jbh-orders.mjs).
   if(url.pathname.startsWith('/jbh/'))return await handleJbh(request,env);
   const ORDER_PATHS=['/subscriptions/orders','/subscriptions/checkout','/subscriptions/status','/subscriptions/entitlement','/orders/checkout'];
