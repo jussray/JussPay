@@ -8,7 +8,7 @@ const plan=Object.freeze({
   approved:true,priceId:'price_introrenewal',unitAmount:1900,currency:'usd',
   interval:'month',termsUrl:'https://merchant.example/promptos-terms',
   entitlements:['promptos.personal_prompts'],
-  intro:{approved:true,firstInvoiceAmountMinor:100,couponId:'coupon_intro_once',renewalConsentRequired:true}
+  intro:{approved:true,firstInvoiceAmountMinor:100,couponId:'coupon_intro_once',renewalConsentRequired:true,tax:{behavior:'inclusive',productCode:'txcd_10105001'}}
 });
 const consent=Object.freeze({
   acceptsTerms:true,acceptsAutomaticRenewal:true,firstInvoiceAmountMinor:100,
@@ -33,7 +33,7 @@ function scenario({intro=plan.intro,renewalConsent=consent,invalidCoupon=false,f
     if(path==='/v1/customers/cus_persona')return Response.json({id:'cus_persona',livemode:false,metadata:{jusspay_subject:'person-a'}});
     if(path==='/v1/prices/price_introrenewal')return Response.json({
       id:plan.priceId,active:true,livemode:false,unit_amount:1900,currency:'usd',
-      product:{id:'prod_VZSVPKfsqwNYrQ',active:true,livemode:false},
+      tax_behavior:'inclusive',product:{id:'prod_VZSVPKfsqwNYrQ',active:true,livemode:false,tax_code:'txcd_10105001'},
       recurring:{interval:'month',interval_count:1,usage_type:'licensed'}
     });
     if(path==='/v1/coupons/coupon_intro_once')return Response.json({
@@ -43,12 +43,12 @@ function scenario({intro=plan.intro,renewalConsent=consent,invalidCoupon=false,f
     });
     if(path==='/v1/checkout/sessions/cs_intro')return Response.json({
       id:'cs_intro',customer:'cus_persona',status:'open',mode:'subscription',
-      livemode:false,amount_total:100,url:'https://checkout.stripe.com/c/test_intro'
+      livemode:false,amount_total:100,automatic_tax:{enabled:true,status:'requires_location_inputs'},billing_address_collection:'required',url:'https://checkout.stripe.com/c/test_intro'
     });
     if(path==='/v1/checkout/sessions')return Response.json({id:'cs_intro',mode:'subscription',
-      livemode:false,amount_total:sessionTotal,url:'https://checkout.stripe.com/c/test_intro'});
+      livemode:false,amount_total:sessionTotal,automatic_tax:{enabled:true,status:'requires_location_inputs'},billing_address_collection:'required',url:'https://checkout.stripe.com/c/test_intro'});
     if(path==='/v1/subscriptions/sub_intro')return Response.json({
-      id:'sub_intro',customer:'cus_persona',status:'active',latest_invoice:latestInvoice,
+      id:'sub_intro',customer:'cus_persona',status:'active',latest_invoice:latestInvoice,automatic_tax:{enabled:true},
       metadata:{jusspay_subject:'person-a',jusspay_product:'promptos',jusspay_intro:'usd_100_first_month_v1'},
       items:{data:[{quantity:1,price:{id:plan.priceId},current_period_end:Date.now()/1000+3600}]}
     });
@@ -56,7 +56,7 @@ function scenario({intro=plan.intro,renewalConsent=consent,invalidCoupon=false,f
       id:'in_first',customer:'cus_persona',subscription:wrongMode?'sub_other':'sub_intro',
       livemode:false,status:firstInvoicePaid?'paid':'open',billing_reason:'subscription_create',
       currency:'usd',total:invoiceTotal,amount_paid:firstInvoicePaid?invoiceTotal:0,
-      amount_remaining:firstInvoicePaid?0:invoiceTotal,
+      amount_remaining:firstInvoicePaid?0:invoiceTotal,automatic_tax:{enabled:true,status:'complete'},
       lines:{has_more:false,data:[{quantity:1,price:{id:invoicePrice}}]}
     });
     throw new Error('Unexpected provider call '+path);
@@ -117,6 +117,8 @@ test('valid sandbox introduction creates a single provider-priced checkout with 
   assert.equal(body.termsUrl,plan.termsUrl);
   const create=s.calls.find(x=>x.path==='/v1/checkout/sessions');
   assert.equal(create.params.get('discounts[0][coupon]'),'coupon_intro_once');
+  assert.equal(create.params.get('automatic_tax[enabled]'),'true');
+  assert.equal(create.params.get('customer_update[address]'),'auto');
   assert.equal(create.params.get('line_items[0][price]'),plan.priceId);
   assert.equal(create.params.get('subscription_data[metadata][jusspay_intro]'),'usd_100_first_month_v1');
   assert.equal(create.params.get('client_reference_id'),'person-a');
@@ -226,4 +228,13 @@ test('eligible introductory catalog and checkout receipts explicitly identify sa
   const reused=await s.checkout();
   assert.equal(reused.status,200);
   assert.equal((await reused.json()).billingMode,'test');
+});
+
+
+test('introductory checkout without approved inclusive tax cannot create a session',async()=>{
+  const s=scenario({intro:{...plan.intro,tax:undefined}});
+  const response=await s.checkout();
+  assert.equal(response.status,503);
+  assert.equal((await response.json()).error,'introductory_tax_configuration_required');
+  assert.equal(s.calls.length,0);
 });
