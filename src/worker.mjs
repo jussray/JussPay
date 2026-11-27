@@ -283,7 +283,20 @@ export class BillingAccount {
   async readEntitlements(){
     if(await this.state.storage.get('suspended'))return [];
     const rows=await this.state.storage.list({prefix:'subscription:'});const now=Date.now()/1000;const catalog=plans(this.env);
-    return [...rows.values()].filter(x=>x.active&&x.until>now&&catalog[x.product]?.priceId===x.priceId).map(({product,until})=>({product,entitlements:catalog[product].entitlements,until}));
+    const result=[];const customer=await this.state.storage.get('customer');
+    for(const [key,row] of rows){
+      const plan=Object.hasOwn(catalog,row.product)?catalog[row.product]:null;
+      if(!row.active||!(row.until>now)||!plan||plan.priceId!==row.priceId)continue;
+      if(plan.intro?.tax){
+        const subscription=key.slice('subscription:'.length);
+        const receipt=await this.state.storage.get(`introVerified:${subscription}`);
+        if(!customer||receipt?.customer!==customer||receipt.priceId!==plan.priceId||
+           receipt.couponId!==plan.intro.couponId||receipt.amountPaid!==100||
+           receipt.taxCode!==plan.intro.tax.productCode)continue;
+      }
+      result.push({product:row.product,entitlements:plan.entitlements,until:row.until});
+    }
+    return result;
   }
   async subscriptionRow(subscription,customerId,subject){
     const s=await stripe(this.env,`subscriptions/${encodeURIComponent(subscription)}`);
