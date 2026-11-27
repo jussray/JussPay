@@ -860,3 +860,30 @@ test('owner cannot mark a live order dispatched without private receipt acceptan
   assert.equal(r.status,409);assert.equal((await r.json()).error,'private_receipt_unconfirmed');
   assert.equal((await queue(h))[0].status,'awaiting_owner_dispatch');
 });
+
+test('live paid event queues redacted FCR receipt atomically and retries without affecting payment',async()=>{
+ const receipts=[];let attempts=0;
+ const h=liveEnv({RELEASE_SHA:'a'.repeat(40),JUSSPAY_FCR_RECEIPTS_ENABLED:'true',JUSSPAY_FCR_HASH_KEY:'hash-'+ 'a'.repeat(40),JUSSPAY_FCR_RECEIPT_KEY:'send-'+ 'b'.repeat(40),
+ JUSSPAY_FCR:{fetch:async req=>{const p=await req.json();receipts.push(p);attempts++;return attempts===1?new Response('{}',{status:503}):Response.json({accepted:true,receiptId:p.receiptId,duplicate:false});}}});
+ const storage=h.book.state.storage;
+ const {orderId,sessionId}=await paidOrder(h);
+ const event={...completed('evt_fcr_paid',sessionId),livemode:true};
+ assert.equal((await worker.fetch(await signed(event),h.env)).status,200);
+ assert.equal(await orderStatus(h,orderId),'paid');
+ assert.equal(receipts.length,0);
+ assert.equal(typeof await storage.getAlarm(),'number');
+ await h.book.alarm();
+ assert.equal(receipts.length,1);
+ const rows=await storage.list({prefix:'fcr-pending:'});
+ assert.equal(rows.size,1);
+ const [key,job]=[...rows][0];
+ await storage.put(key,{...job,nextAttemptAt:0});
+ await h.book.alarm();
+ assert.deepEqual(receipts[0],receipts[1]);
+ assert.equal((await storage.list({prefix:'fcr-pending:'})).size,0);
+ assert.equal((await storage.list({prefix:'fcr-delivered:'})).size,1);
+ assert.doesNotMatch(JSON.stringify(receipts),/buyer@example|jbho_|evt_fcr_paid|pi_test/);
+ await worker.fetch(await signed(event),h.env);
+ await h.book.alarm();
+ assert.equal(receipts.length,2);
+});
