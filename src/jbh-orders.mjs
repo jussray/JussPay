@@ -120,6 +120,43 @@ function requireLiveOwnerQueue(env){
     fail(503,'jbh_owner_queue_unavailable');
 }
 
+function privateReceiptSettings(env){
+  const live=jbhLive(env);
+  const enabled=live?env.JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:env.JBH_PRIVATE_RECEIPTS_ENABLED;
+  const secret=live?env.JBH_PRIVATE_LIVE_RECEIPT_SECRET:env.JBH_PRIVATE_RECEIPT_SECRET;
+  if(enabled!=='true'||typeof secret!=='string'||secret.length<32||secret.length>512||!env.JBH_PRIVATE_WORKER?.fetch)return null;
+  if(live&&[env.JBH_PRIVATE_RECEIPT_SECRET,env.JBH_OWNER_KEY,env.JBH_OWNER_BRIDGE_KEY,env.JBH_STOREFRONT_KEY,env.JBH_MONITOR_KEY,env.JBH_STRIPE_SECRET_KEY,env.JBH_STRIPE_WEBHOOK_SECRET].includes(secret))return null;
+  return {live,secret};
+}
+
+function requireLivePrivateReceiptConfig(env){
+  if(jbhLive(env)&&!privateReceiptSettings(env))fail(503,'jbh_private_receipt_not_configured');
+}
+
+async function signedPrivateRequest(env,settings,path,payload){
+  const raw=JSON.stringify(payload);
+  const enc=new TextEncoder();
+  const key=await crypto.subtle.importKey('raw',enc.encode(settings.secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,enc.encode(raw)));
+  const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
+  return env.JBH_PRIVATE_WORKER.fetch(new Request('http://localhost/internal/jusspay/'+(settings.live?'live':'sandbox')+'/'+path,
+    {method:'POST',redirect:'error',signal:AbortSignal.timeout(8000),headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
+}
+
+async function requireLivePrivateReceiverReady(env){
+  if(!jbhLive(env))return;
+  requireLivePrivateReceiptConfig(env);
+  try{
+    const schema='jbh-private/jusspay-live-readiness@v1';
+    const response=await signedPrivateRequest(env,privateReceiptSettings(env),'readiness',{schema});
+    if(response.ok){
+      const result=await response.json();
+      if(result?.schema===schema&&result.livemode===true&&result.configured===true&&/^[a-f0-9]{40}$/.test(result.releaseSha||''))return;
+    }
+  }catch{/* Never include receiver error bodies or credentials in a public response. */}
+  fail(503,'jbh_private_receipt_unavailable');
+}
+
 async function requireOwner(request,env){
   if(!env.JBH_OWNER_KEY||env.JBH_OWNER_KEY.length<32||!await sameSecret(request.headers.get('x-jbh-owner-key'),env.JBH_OWNER_KEY))fail(401,'owner_key_required');
 }
@@ -164,7 +201,7 @@ export async function handleJbh(request,env){
         !await sameSecret(request.headers.get('x-jbh-monitor-key'),key))fail(401,'monitor_key_required');
       const result=jbhConfigurationReview(env,{
         ready:()=>jbhReady(env),catalog:()=>jbhCatalog(env),shipping:()=>jbhShipping(env),
-        owner:()=>requireLiveOwnerQueue(env),authority:items=>liveVendorAuthority(env,items)
+        owner:()=>requireLiveOwnerQueue(env),privateReceiver:()=>requireLivePrivateReceiptConfig(env),authority:items=>liveVendorAuthority(env,items)
       });
       const releaseSha=/^[a-f0-9]{40}$/.test(env.RELEASE_SHA||'')?env.RELEASE_SHA:null;
       return new Response(JSON.stringify({schema:'jusspay/jbh-monitoring-preflight@v1',releaseSha,...result}),{
@@ -177,7 +214,7 @@ export async function handleJbh(request,env){
       await requireOwner(request,env);
       const result=jbhConfigurationReview(env,{
         ready:()=>jbhReady(env),catalog:()=>jbhCatalog(env),shipping:()=>jbhShipping(env),
-        owner:()=>requireLiveOwnerQueue(env),authority:items=>liveVendorAuthority(env,items)
+        owner:()=>requireLiveOwnerQueue(env),privateReceiver:()=>requireLivePrivateReceiptConfig(env),authority:items=>liveVendorAuthority(env,items)
       });
       return json(result,result.configurationValid?200:503);
     }
@@ -191,6 +228,7 @@ export async function handleJbh(request,env){
       if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
       jbhShipping(env);
       if(live)liveVendorAuthority(env,Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor})));
+      await requireLivePrivateReceiverReady(env);
       await jbhAccount(env,true);
       return json({ready:true,mode:live?'live':'sandbox',chargesEnabled:true});
     }
@@ -206,6 +244,7 @@ export async function handleJbh(request,env){
         if(!REQUEST_ID.test(input.requestId||''))fail(400,'request_id_required');
         const priced=priceOrder(env,input);
         if(jbhLive(env))liveVendorAuthority(env,priced.items);
+        await requireLivePrivateReceiverReady(env);
         await jbhAccount(env,true);
         return toBook(env,'/checkout',{requestId:input.requestId,priced});
       }
@@ -247,6 +286,7 @@ export async function handleJbh(request,env){
         approvedCatalogConfigured:catalog!==null,
         shippingConfigured,
         vendorEvidenceContractValid,
+        privateLiveReceiptConfigured:env.JBH_STRIPE_LIVE==='true'&&Boolean(privateReceiptSettings(env)),
       };
       return json({
         readOnly:true,
@@ -340,7 +380,8 @@ export class JbhOrderBook{
       form[`line_items[${i}][price_data][product_data][name]`]=x.name;
       form[`line_items[${i}][price_data][product_data][metadata][jbh_sku]`]=x.sku;
     });
-    // Recheck the merchant inside the order book immediately before the charge-capable request.
+    // Recheck configuration and merchant inside the order book immediately before the charge-capable request.
+    requireLivePrivateReceiptConfig(env);
     await jbhAccount(env,true);
     const s=await jbhStripe(env,'checkout/sessions','POST',form,`jbh-checkout-${id}`);
     if(!new RegExp(`^cs_${jbhLive(env)?'live':'test'}_`).test(s.id||'')||s.livemode!==jbhLive(env)||typeof s.url!=='string')fail(502,'stripe_unavailable');
@@ -354,6 +395,10 @@ export class JbhOrderBook{
     const f=await storage.get(`fulfillment:${id}`);
     if(!f)fail(404,'not_found');
     if(f.status!=='awaiting_owner_dispatch')fail(409,'not_dispatchable');
+    if(jbhLive(this.env)){
+      const receipt=await storage.get('private-receipt:'+id);
+      if(receipt?.delivered!==true||receipt.receiverState!=='awaiting_owner_review')fail(409,'private_receipt_unconfirmed');
+    }
     await storage.transaction(async txn=>{
       await txn.put(`fulfillment:${id}`,{...f,status:'dispatched',dispatchedAt:Date.now(),note});
       await txn.delete(`queue:${id}`);
@@ -383,44 +428,31 @@ export class JbhOrderBook{
     return {orderId:orderId||null,charge,pi};
   }
 
-  async forwardPrivateReceipt(orderId){
-    const env=this.env,storage=this.state.storage;
-    const pending=await storage.get(`private-receipt:${orderId}`);
+  async forwardPrivate(kind,orderId){
+    const env=this.env,storage=this.state.storage,key='private-'+kind+':'+orderId;
+    const pending=await storage.get(key);
     if(!pending||pending.delivered===true)return;
-    const order=await storage.get(`order:${orderId}`);
-    const fulfillment=await storage.get(`fulfillment:${orderId}`);
-    if(order?.status!=='paid'||fulfillment?.status!=='awaiting_owner_dispatch')return;
-    if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true')return;
-    if(!env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32||!env.JBH_PRIVATE_WORKER?.fetch)return;
-    const raw=JSON.stringify(pending.payload);
-    const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.JBH_PRIVATE_RECEIPT_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-    const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
-    const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
-    try{
-      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request(`http://localhost/internal/jusspay/${jbhLive(env)?'live':'sandbox'}/paid-receipt`,{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
-      if(response.ok)await storage.put(`private-receipt:${orderId}`,{...pending,delivered:true});
-    }catch{
-      // Retain the durable pending receipt for a later signed webhook replay.
+    const settings=privateReceiptSettings(env);
+    if(!settings)return;
+    if(kind==='receipt'){
+      const order=await storage.get('order:'+orderId);
+      const fulfillment=await storage.get('fulfillment:'+orderId);
+      if(order?.status!=='paid'||!fulfillment||(!settings.live&&fulfillment.status!=='awaiting_owner_dispatch'))return;
     }
+    try{
+      const response=await signedPrivateRequest(env,settings,'paid-receipt',pending.payload);
+      if(!response.ok)return;
+      if(!settings.live){await storage.put(key,{...pending,delivered:true});return;}
+      const ack=await response.json();
+      if(ack?.schema!=='jbh-private/jusspay-live-receipt@v1'||ack.received!==true||ack.livemode!==true||
+         ack.orderId!==orderId||ack.eventId!==pending.payload.eventId||typeof ack.duplicate!=='boolean'||
+         !['awaiting_owner_review','hold'].includes(ack.state)||(kind==='hold'&&ack.state!=='hold'))return;
+      await storage.put(key,{...pending,delivered:true,receiverState:ack.state});
+    }catch{/* Durable record retained; retry on signed webhook replay. */}
   }
 
-  async forwardPrivateHold(orderId){
-    const env=this.env,storage=this.state.storage;
-    const pending=await storage.get(`private-hold:${orderId}`);
-    if(!pending||pending.delivered===true)return;
-    if(env.JBH_PRIVATE_RECEIPTS_ENABLED!=='true'||!env.JBH_PRIVATE_WORKER?.fetch||
-       !env.JBH_PRIVATE_RECEIPT_SECRET||env.JBH_PRIVATE_RECEIPT_SECRET.length<32)return;
-    const raw=JSON.stringify(pending.payload);
-    const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.JBH_PRIVATE_RECEIPT_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-    const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw)));
-    const signature=[...bytes].map(x=>x.toString(16).padStart(2,'0')).join('');
-    try{
-      const response=await env.JBH_PRIVATE_WORKER.fetch(new Request(`http://localhost/internal/jusspay/${jbhLive(env)?'live':'sandbox'}/paid-receipt`,{method:'POST',headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
-      if(response.ok)await storage.put(`private-hold:${orderId}`,{...pending,delivered:true});
-    }catch{
-      // Keep the pending hold for a later webhook replay.
-    }
-  }
+  async forwardPrivateReceipt(orderId){return this.forwardPrivate('receipt',orderId);}
+  async forwardPrivateHold(orderId){return this.forwardPrivate('hold',orderId);}
 
   confirmationConfig(){
     const e=this.env;
