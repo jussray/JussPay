@@ -860,3 +860,27 @@ test('owner cannot mark a live order dispatched without private receipt acceptan
   assert.equal(r.status,409);assert.equal((await r.json()).error,'private_receipt_unconfirmed');
   assert.equal((await queue(h))[0].status,'awaiting_owner_dispatch');
 });
+
+test('checkout requires explicit matching payment mode before provider or order-book activity',async()=>{
+  for(const h of [jbhEnv(),liveEnv({JBH_CATALOG:JSON.stringify({'BRAZ-SEW-BW-10-12-14':CATALOG['BRAZ-SEW-BW-10-12-14']})})]){
+    const expected=h.env.JBH_STRIPE_LIVE==='true'?'live':'sandbox';
+    for(const mode of [undefined,'invalid',expected==='live'?'sandbox':'live']){
+      const headers={...sf,...(mode?{'x-jbh-checkout-mode':mode}:{})};
+      const response=await worker.fetch(post('/jbh/checkout',{items:[{sku:'BRAZ-SEW-BW-10-12-14',quantity:1}]},headers),h.env);
+      assert.equal(response.status,409);
+      assert.equal((await response.json()).error,'jbh_checkout_mode_mismatch');
+      assert.equal(h.calls.length,0);
+      assert.equal((await h.book.state.storage.list({prefix:'order:'})).size,0);
+    }
+  }
+});
+test('order book independently rejects stale checkout mode before storage or provider access',async()=>{
+  const h=jbhEnv();
+  for(const mode of ['live',undefined]){
+    const response=await h.book.fetch(new Request('https://internal/checkout',{method:'POST',body:JSON.stringify({requestId:crypto.randomUUID(),expectedMode:mode,priced:{}})}));
+    assert.equal(response.status,409);
+    assert.equal((await response.json()).error,'jbh_checkout_mode_mismatch');
+  }
+  assert.equal(h.calls.length,0);
+  assert.equal((await h.book.state.storage.list({prefix:'order:'})).size,0);
+});
