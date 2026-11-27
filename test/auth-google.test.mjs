@@ -120,7 +120,7 @@ test('AUTH adapter keeps the existing Supabase issuer path independent of Google
   const token=segments.join('.');
   const res=await verify(token,{SUPABASE_URL:'https://unit-test.supabase.co',SUPABASE_API_KEY:'unit-test-only',
     PROMPTOS_GOOGLE_CLIENT_ID:clientId,GOOGLE_JWKS_FETCH:()=>{throw new Error('Wrong provider')},
-    SUPABASE_FETCH:async()=>Response.json({id:uuid,aud:'authenticated'})});
+    SUPABASE_FETCH:async()=>Response.json({id:uuid,aud:'authenticated',is_anonymous:false,email_confirmed_at:'2025-01-01T00:00:00Z'})});
   assert.equal(res.status,200);
   assert.equal((await res.json()).subject,`https://unit-test.supabase.co/auth/v1#${uuid}`);
 });
