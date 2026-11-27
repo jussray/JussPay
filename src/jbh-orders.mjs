@@ -143,6 +143,10 @@ async function signedPrivateRequest(env,settings,path,payload){
     {method:'POST',redirect:'error',signal:AbortSignal.timeout(8000),headers:{'content-type':'application/json','x-jbh-jusspay-signature':signature},body:raw}));
 }
 
+function requireCheckoutMode(env,mode){
+  if(mode!==(jbhLive(env)?'live':'sandbox'))fail(409,'jbh_checkout_mode_mismatch');
+}
+
 async function requireLivePrivateReceiverReady(env){
   if(!jbhLive(env))return;
   requireLivePrivateReceiptConfig(env);
@@ -237,6 +241,8 @@ export async function handleJbh(request,env){
       if(!await sameSecret(request.headers.get('x-jbh-storefront-key'),env.JBH_STOREFRONT_KEY))fail(401,'storefront_key_required');
       if(path==='/jbh/checkout'){
         if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+        const expectedMode=request.headers.get('x-jbh-checkout-mode');
+        requireCheckoutMode(env,expectedMode);
         if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
         requireLiveOwnerQueue(env);
         const input=await jsonBody(request,4096);
@@ -246,7 +252,7 @@ export async function handleJbh(request,env){
         if(jbhLive(env))liveVendorAuthority(env,priced.items);
         await requireLivePrivateReceiverReady(env);
         await jbhAccount(env,true);
-        return toBook(env,'/checkout',{requestId:input.requestId,priced});
+        return toBook(env,'/checkout',{requestId:input.requestId,priced,expectedMode});
       }
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
       const id=path.slice('/jbh/orders/'.length);
@@ -336,7 +342,7 @@ export class JbhOrderBook{
   fetch(request){const run=this.tail.then(()=>this.handle(request));this.tail=run.catch(()=>{});return run;}
   async handle(request){try{
     const path=new URL(request.url).pathname;const input=await request.json();
-    if(path==='/checkout')return await this.checkout(input.requestId,input.priced);
+    if(path==='/checkout')return await this.checkout(input.requestId,input.priced,input.expectedMode);
     if(path==='/order'){const o=await this.state.storage.get(`order:${input.id}`);return o?json(publicOrder(o)):json({error:'not_found'},404);}
     if(path==='/fulfillment'){
       const rows=[];for(const id of (await this.state.storage.list({prefix:'queue:'})).values()){const f=await this.state.storage.get(`fulfillment:${id}`);if(f)rows.push(f);}
@@ -347,8 +353,9 @@ export class JbhOrderBook{
     return json({error:'not_found'},404);
   }catch(e){return json({error:e.status?e.message:'internal_error'},e.status||500);}}
 
-  async checkout(requestId,priced){
+  async checkout(requestId,priced,expectedMode){
     const env=this.env,storage=this.state.storage;
+    requireCheckoutMode(env,expectedMode);
     if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
     const fingerprint=await digest(JSON.stringify([priced.items.map(x=>[x.sku,x.quantity,x.unitAmount]),priced.shipping,priced.total]));
     let id=await storage.get(`request:${requestId}`);
