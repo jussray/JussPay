@@ -101,3 +101,19 @@ test('sandbox access requires exact paid invoice and successful tax assessment',
     assert.equal((await s.state.storage.get('introVerified:sub_fixture'))?.taxCode,shouldUnlock?taxCode:undefined);
   }
 });
+
+test('cached active subscriptions require the current tax-scoped paid receipt',async()=>{
+  const s=scenario();
+  await s.state.storage.put('customer','cus_example');
+  await s.state.storage.put('subscription:sub_fixture',{active:true,product:'chief',priceId,
+    until:Date.now()/1000+3600,entitlements:plan.entitlements});
+  const receipt={customer:'cus_example',priceId,couponId,amountPaid:100,invoiceId:'in_fixture'};
+  assert.deepEqual(await s.billing.readEntitlements(),[]);
+  for(const bad of [{},{taxCode:'txcd_10103000'},{taxCode,couponId:'coupon_other'},
+    {taxCode,customer:'cus_other'},{taxCode,amountPaid:99}]){
+    await s.state.storage.put('introVerified:sub_fixture',{...receipt,...bad});
+    assert.deepEqual(await s.billing.readEntitlements(),[]);
+  }
+  await s.state.storage.put('introVerified:sub_fixture',{...receipt,taxCode});
+  assert.equal((await s.billing.readEntitlements()).length,1);
+});
