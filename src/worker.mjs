@@ -46,13 +46,14 @@ export function plans(env){
   return values;
 }
 function ready(env,webhook=false){stripeConfiguration(env);if(!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET || !env.STRIPE_API_VERSION || !env.BILLING || !['true','false'].includes(env.STRIPE_LIVE))fail(503,'billing_not_configured');if(!webhook&&(!env.AUTH || !env.APP_ORIGIN || !env.APP_ORIGIN.startsWith('https://') || new URL(env.APP_ORIGIN).origin!==env.APP_ORIGIN)) fail(503,'billing_not_configured');}
+function validAutomaticTax(session){
+  return session.automatic_tax?.enabled===true && session.billing_address_collection==='required' && session.automatic_tax.status!=='failed';
+}
 function validIntroCheckout(session,plan){
   return session.mode==='subscription' && session.livemode===false &&
     session.amount_total===100 && typeof session.url==='string' &&
     session.url.startsWith('https://checkout.stripe.com/') &&
-    (!plan.intro.tax || (session.automatic_tax?.enabled===true &&
-      session.billing_address_collection==='required' &&
-      session.automatic_tax.status!=='failed'));
+    validAutomaticTax(session);
 }
 export async function stripe(env,path,method='GET',data,key){
   const headers={'authorization':`Bearer ${env.STRIPE_SECRET_KEY}`,'Stripe-Version':env.STRIPE_API_VERSION};
@@ -179,6 +180,7 @@ export class BillingAccount {
       (input.product==='promptos'&&(this.env.INTRODUCTORY_OFFERS_ENABLED==='true'||this.env.STRIPE_LIVE==='true'))))fail(503,'introductory_offer_required');
     if(path==='/checkout'&&selectedPlan.intro){
       const p=selectedPlan,c=input.introConsent;
+      if(!p.intro.tax)fail(503,'introductory_tax_configuration_required');
       if(this.env.INTRODUCTORY_OFFERS_ENABLED!=='true'||this.env.STRIPE_LIVE!=='false')fail(503,'introductory_offer_disabled');
       if(!c || c.acceptsTerms!==true || c.acceptsAutomaticRenewal!==true ||
          c.firstInvoiceAmountMinor!==100 || c.renewalAmountMinor!==p.unitAmount ||
@@ -214,7 +216,7 @@ export class BillingAccount {
          !Array.isArray(allowedProducts)||!allowedProducts.includes(price.product.id))
          fail(503,'introductory_discount_mismatch');
     }
-    const fingerprint=await digest(JSON.stringify([p.priceId,p.unitAmount,p.currency,p.interval,p.entitlements,p.termsUrl,this.env.APP_ORIGIN,...(p.intro?[p.intro]:[])]));
+    const fingerprint=await digest(JSON.stringify([p.priceId,p.unitAmount,p.currency,p.interval,p.entitlements,p.termsUrl,this.env.APP_ORIGIN,'automatic_tax_v1',...(p.intro?[p.intro]:[])]));
     let attempt=await this.state.storage.get(`checkout:${input.product}`);
     // Upgrade any pre-release string receipt to an explicit attempt record.
     if(typeof attempt==='string')attempt={id:attempt};
@@ -226,6 +228,7 @@ export class BillingAccount {
         if(attempt.fingerprint===fingerprint){
           if(p.intro&&!validIntroCheckout(session,p))
             fail(503,'introductory_checkout_total_mismatch');
+          if(!validAutomaticTax(session))fail(503,'checkout_tax_configuration_mismatch');
           return json({url:session.url,...(p.intro?{billingMode:'test',firstInvoiceAmountMinor:100,
             renewalAmountMinor:p.unitAmount,currency:'usd',interval:'month',termsUrl:p.termsUrl}:{})});
         }
@@ -255,15 +258,14 @@ export class BillingAccount {
       sessionForm['metadata[jusspay_intro]']='usd_100_first_month_v1';
       sessionForm['subscription_data[metadata][jusspay_intro]']='usd_100_first_month_v1';
     }
-    if(introTax){
-      sessionForm['automatic_tax[enabled]']='true';
-      sessionForm.billing_address_collection='required';
-      sessionForm['customer_update[address]']='auto';
-    }
+    sessionForm['automatic_tax[enabled]']='true';
+    sessionForm.billing_address_collection='required';
+    sessionForm['customer_update[address]']='auto';
     const s=await stripe(this.env,'checkout/sessions','POST',sessionForm,
       `checkout-${await digest(`${input.subject}:${input.product}:${attempt.key}`)}`);
     if(p.intro && !validIntroCheckout(s,p))
        fail(503,'introductory_checkout_total_mismatch');
+    if(!validAutomaticTax(s))fail(503,'checkout_tax_configuration_mismatch');
     if(p.intro){
       // Consent receipt and session identity must be recorded together.
       await this.state.storage.transaction(async txn=>{
