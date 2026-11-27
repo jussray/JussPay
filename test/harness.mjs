@@ -11,8 +11,11 @@
 import {BillingAccount} from '../src/worker.mjs';
 
 export function memoryStorage(){
-  let db=new Map();
+  let db=new Map(),alarm=null;
   return {
+    async getAlarm(){return alarm;},
+    async setAlarm(at){alarm=at;},
+    async deleteAlarm(){alarm=null;},
     async get(k){return structuredClone(db.get(k));},
     async put(k,v){db.set(k,structuredClone(v));},
     async delete(k){return db.delete(k);},

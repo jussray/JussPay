@@ -70,3 +70,26 @@ This repository is the deliberate design merge (2026-11-05) of the three JussPay
 Primary references inspected while implementing: [Stripe hosted subscription Checkout](https://docs.stripe.com/billing/subscriptions/build-subscriptions?payment-ui=checkout&ui=stripe-hosted), [webhook delivery/signatures](https://docs.stripe.com/webhooks), [portal lifecycle events](https://docs.stripe.com/customer-management/integrate-customer-portal), [metadata](https://docs.stripe.com/metadata/use-cases), [event formats](https://docs.stripe.com/events/set-up-events).
 
 Auth references inspected: [server-verified user](https://supabase.com/docs/reference/javascript/auth-getuser), [JWT endpoint and claims](https://supabase.com/docs/guides/auth/jwts), [Supabase changelog](https://supabase.com/changelog.md). The changelog's relevant breaking TLS change concerns CBC cipher removal; Workers use modern platform TLS, no custom cipher configuration. No installed Supabase SDK or CLI is used.
+
+### JBH customer confirmation (optional, disabled by default)
+
+After verified live payment, JussPay commits a pending confirmation alongside the order and fulfillment records. The order-book alarm sends a transactional confirmation through Resend only when `JBH_CONFIRMATIONS_ENABLED=true`, a provider-held `JBH_RESEND_API_KEY` and a verified `JBH_CONFIRMATION_FROM` address on jussbeautifulhair.com are configured. Sandbox never sends customer email. The immutable request and idempotency key are persisted before sending; retries are bounded within the provider's idempotency window (23 hours, at most ten attempts). Provider acceptance is not proof of mailbox delivery. Refunds/disputes hold unsent confirmations; unresolved outcomes require owner reconciliation. Previously queued jobs require a signed webhook replay to wake the alarm after enabling the feature. Historical orders predating this implementation are not automatically backfilled. No email credentials or customer details enter a public receipt. Validate the sender, provider policy, and a controlled delivery test before activation.
+
+### JBH private live receipt integration
+
+Live checkout and health require the independent `JBH_PRIVATE_LIVE_RECEIPTS_ENABLED=true`,
+`JBH_PRIVATE_LIVE_RECEIPT_SECRET` and existing private service binding.
+A signed readiness probe must return the exact live contract and configured
+database-access result before any Stripe request. This is not proof of
+supplier inventory or actual dispatch. Paid/hold deliveries are acknowledged
+only by the exact persisted event and order reference; generic HTTP success
+does not qualify. Live owner dispatch marking additionally requires an
+accepted private paid receipt without a receiver hold. The shared order-book
+alarm retries pending receipt deliveries up to twelve times; exhaustion is
+recorded for reconciliation. Signed webhook replays can recover delivery.
+Previously recorded orders are not automatically backfilled. If delivery
+configuration is absent, pending work needs an authorized replay after
+provisioning to wake its alarm. Sandbox remains isolated. Keep live charges
+disabled until both releases, the private database migration, the shared
+live HMAC secret, the complete approved catalog, vendor handoff and actual
+end-to-end fulfillment have been independently verified.
