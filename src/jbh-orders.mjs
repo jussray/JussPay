@@ -11,6 +11,7 @@
 import {verifySignature,digest,stripe,json,fail,boundedText} from './worker.mjs';
 import {jbhVendorAdapters,liveVendorAuthority,vendorOwnerPlan} from './jbh-vendor-adapters.mjs';
 import {jbhConfigurationReview} from './jbh-preflight.mjs';
+import {buildCommerceReceipt,sendCommerceReceipt,fcrReceiptEnabled} from './fcr-commerce-receipts.mjs';
 
 // Juss Ray Beauty Co is the only permitted live merchant. Sandbox retains its own
 // account ID and never shares the live order book.
@@ -462,9 +463,10 @@ export class JbhOrderBook{
   }
 
   privateDeliveryConfig(){return jbhLive(this.env)&&Boolean(privateReceiptSettings(this.env));}
+  fcrDeliveryConfig(){return jbhLive(this.env)&&fcrReceiptEnabled(this.env);}
 
   async armConfirmation(){
-    if(!this.confirmationConfig()&&!this.privateDeliveryConfig())return;
+    if(!this.confirmationConfig()&&!this.privateDeliveryConfig()&&!this.fcrDeliveryConfig())return;
     const storage=this.state.storage;
     const existing=await storage.getAlarm();
     if(existing===null||existing>Date.now()+1000)await storage.setAlarm(Date.now()+1000);
@@ -479,14 +481,43 @@ export class JbhOrderBook{
   }
 
   async processDeliveryJobs(){
-    if(!this.privateDeliveryConfig()&&!this.confirmationConfig())return;
+    if(!this.privateDeliveryConfig()&&!this.confirmationConfig()&&!this.fcrDeliveryConfig())return;
     const storage=this.state.storage;
     await storage.setAlarm(Date.now()+60000);
     if(this.privateDeliveryConfig())await this.processPrivateDeliveries();
     if(this.confirmationConfig())await this.processConfirmations();
+    if(this.fcrDeliveryConfig())await this.processFcrDeliveries();
     const pendingPrivate=this.privateDeliveryConfig()&&(await storage.list({prefix:'private-pending:',limit:1})).size>0;
     const pendingConfirmation=this.confirmationConfig()&&(await storage.list({prefix:'confirmation-pending:',limit:1})).size>0;
-    if(!pendingPrivate&&!pendingConfirmation)await storage.deleteAlarm();
+    const pendingFcr=this.fcrDeliveryConfig()&&(await storage.list({prefix:'fcr-pending:',limit:1})).size>0;
+    if(!pendingPrivate&&!pendingConfirmation&&!pendingFcr)await storage.deleteAlarm();
+  }
+
+  async processFcrDeliveries(){
+    const storage=this.state.storage;
+    for(const [key,job] of await storage.list({prefix:'fcr-pending:',limit:10})){
+      if(job.nextAttemptAt>Date.now())continue;
+      const id=key.slice('fcr-pending:'.length);
+      if(job.attempts>=12||!job.releaseSha){
+        await storage.transaction(async tx=>{
+          await tx.put('fcr-reconciliation:'+id,{...job,reason:job.releaseSha?'retry_exhausted':'source_release_unknown'});
+          await tx.delete(key);
+        });
+        continue;
+      }
+      let receipt=job.receipt;
+      if(!receipt){
+        try{receipt=await buildCommerceReceipt({...this.env,RELEASE_SHA:job.releaseSha},job.fact);}catch{}
+      }
+      const next={...job,receipt:receipt||null,attempts:job.attempts+1,nextAttemptAt:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempts,6))};
+      await storage.put(key,next);
+      if(receipt&&await sendCommerceReceipt(this.env,receipt)){
+        await storage.transaction(async tx=>{
+          await tx.put('fcr-delivered:'+id,{receiptId:receipt.receiptId,at:Date.now()});
+          await tx.delete(key);
+        });
+      }
+    }
   }
 
   async privateDeliveryPending(id){
@@ -631,11 +662,19 @@ export class JbhOrderBook{
 
     // Schedule before committing the outbox so a crash cannot strand an enabled job.
     const privateWork=jbhLive(this.env)&&(queue==='add'||(next&&['refunded','partially_refunded','disputed'].includes(next.status)));
+    const fcrEvent=privateWork?(queue==='add'?'payment_recorded':next.status==='disputed'?'dispute_hold':'refund_hold'):null;
     if(privateWork)await this.armConfirmation();
     await storage.transaction(async txn=>{
       if(await txn.get(`event:${event.id}`))return;
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
       if(privateWork)await txn.put(`private-pending:${orderId}`,{id:orderId,attempts:0,nextAttemptAt:0});
+      if(fcrEvent){
+        const releaseSha=/^[a-f0-9]{40}$/.test(this.env.RELEASE_SHA||'')?this.env.RELEASE_SHA:null;
+        await txn.put('fcr-pending:'+event.id,{releaseSha,attempts:0,nextAttemptAt:0,fact:{
+          orderId,eventId:event.id,product:'jbh',event:fcrEvent,grossMinor:fcrEvent==='payment_recorded'?next.total:null,
+          occurredAt:Date.now(),livemode:true
+        }});
+      }
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
       if(next && ['refunded','partially_refunded','disputed'].includes(next.status)){
         await txn.put(`private-hold:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:jbhLive(this.env),orderId,paymentIntentId:next.paymentIntent,state:next.status}});
