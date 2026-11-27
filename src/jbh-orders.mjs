@@ -422,11 +422,82 @@ export class JbhOrderBook{
     }
   }
 
+  confirmationConfig(){
+    const e=this.env;
+    return jbhLive(e)&&e.JBH_CONFIRMATIONS_ENABLED==='true'&&
+      typeof e.JBH_RESEND_API_KEY==='string'&&e.JBH_RESEND_API_KEY.startsWith('re_')&&
+      typeof e.JBH_CONFIRMATION_FROM==='string'&&/^[a-zA-Z0-9._+-]+@jussbeautifulhair\.com$/.test(e.JBH_CONFIRMATION_FROM);
+  }
+
+  async armConfirmation(){
+    if(!this.confirmationConfig())return;
+    const storage=this.state.storage;
+    const existing=await storage.getAlarm();
+    if(existing===null||existing>Date.now()+1000)await storage.setAlarm(Date.now()+1000);
+  }
+
+  // Serialize with payment/refund handlers. Re-arm before network I/O so a
+  // crash after provider acceptance leaves a recoverable pending job.
+  alarm(){
+    const run=this.tail.then(()=>this.processConfirmations());
+    this.tail=run.catch(()=>{});
+    return run;
+  }
+
+  async processConfirmations(){
+    if(!this.confirmationConfig())return;
+    const storage=this.state.storage;
+    await storage.setAlarm(Date.now()+60000);
+    const rows=await storage.list({prefix:'confirmation-pending:',limit:20});
+    for(const [queueKey,id] of rows){
+      const jobKey='confirmation:'+id;
+      const job=await storage.get(jobKey);
+      if(!job||job.status!=='pending'){await storage.delete(queueKey);continue;}
+      const order=await storage.get('order:'+id);
+      const f=await storage.get('fulfillment:'+id);
+      if(order?.status!=='paid'){
+        await storage.transaction(async tx=>{await tx.put(jobKey,{status:'held',createdAt:job.createdAt});await tx.delete(queueKey);});
+        continue;
+      }
+      if(job.nextAttemptAt>Date.now())continue;
+      const now=Date.now();
+      if((job.firstAttemptAt&&now-job.firstAttemptAt>=23*3600000)||job.attempts>=10||now-job.createdAt>=7*86400000){
+        await storage.transaction(async tx=>{await tx.put(jobKey,{status:'reconciliation_required',createdAt:job.createdAt,attempts:job.attempts});await tx.delete(queueKey);});
+        continue;
+      }
+      if(typeof f?.email!=='string'||f.email.length>254||!/^\S+@\S+\.\S+$/.test(f.email)||/[\r\n]/.test(f.email)){
+        await storage.transaction(async tx=>{await tx.put(jobKey,{status:'recipient_missing',createdAt:job.createdAt});await tx.delete(queueKey);});
+        continue;
+      }
+      // Persist the exact immutable request before first attempt. Provider
+      // idempotency lasts 24 hours; never retry beyond our narrower window.
+      const payload=job.payload||{from:this.env.JBH_CONFIRMATION_FROM,to:[f.email],
+        subject:'Juss Beautiful Hair — order confirmation',
+        text:'Payment received. Thank you for your order from Juss Beautiful Hair.\nOrder: '+id+'\nTotal: USD '+(order.total/100).toFixed(2)+'\nYour order is awaiting fulfillment. This is not a shipping confirmation.'};
+      const attempt={...job,payload,firstAttemptAt:job.firstAttemptAt||now,attempts:job.attempts+1,
+        nextAttemptAt:now+Math.min(3600000,60000*2**Math.min(job.attempts,6))};
+      await storage.put(jobKey,attempt);
+      let accepted=null;
+      try{
+        const response=await (this.env.JBH_EMAIL_FETCH||fetch)('https://api.resend.com/emails',{
+          method:'POST',redirect:'error',signal:AbortSignal.timeout(8000),
+          headers:{Authorization:'Bearer '+this.env.JBH_RESEND_API_KEY,'Content-Type':'application/json','Idempotency-Key':'jbh-confirmation/'+id},
+          body:JSON.stringify(payload)});
+        if(response.ok){const result=await response.json();if(typeof result.id==='string'&&result.id.length>0&&result.id.length<200)accepted=result.id;}
+      }catch{/* Retain pending attempt; never log email or provider response. */}
+      if(accepted)await storage.transaction(async tx=>{
+        await tx.put(jobKey,{status:'provider_accepted',createdAt:job.createdAt,acceptedAt:Date.now(),attempts:attempt.attempts,providerId:accepted});
+        await tx.delete(queueKey);
+      });
+    }
+    if(!(await storage.list({prefix:'confirmation-pending:',limit:1})).size)await storage.deleteAlarm();
+  }
+
   async event(event){
     const storage=this.state.storage;
     if(await storage.get(`event:${event.id}`)){
       const existing=await storage.get(`event:${event.id}`);
-      if(existing?.orderId){await this.forwardPrivateHold(existing.orderId);await this.forwardPrivateReceipt(existing.orderId);}
+      if(existing?.orderId){await this.forwardPrivateHold(existing.orderId);await this.forwardPrivateReceipt(existing.orderId);await this.armConfirmation();}
       return json({received:true,duplicate:true});
     }
     const o=event.data?.object||{};
@@ -475,6 +546,8 @@ export class JbhOrderBook{
       if(f&&f.status==='dispatched')await this.receipt(orderId,'refund_or_dispute_after_dispatch',{event:event.id,type:event.type});
     }
 
+    // Schedule before committing the outbox so a crash cannot strand an enabled job.
+    if(queue==='add'&&jbhLive(this.env))await this.armConfirmation();
     await storage.transaction(async txn=>{
       if(await txn.get(`event:${event.id}`))return;
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
@@ -484,6 +557,10 @@ export class JbhOrderBook{
       }
       if(queue==='add'){
         await txn.put(`queue:${orderId}`,orderId);
+        if(jbhLive(this.env)){
+          await txn.put(`confirmation:${orderId}`,{status:'pending',createdAt:Date.now(),attempts:0,nextAttemptAt:0});
+          await txn.put(`confirmation-pending:${orderId}`,orderId);
+        }
         await txn.put(`private-receipt:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:jbhLive(this.env),orderId,paymentIntentId:next.paymentIntent,state:'awaiting_owner_dispatch'}});
       }
       await txn.put(`event:${event.id}`,{type:event.type,orderId,processedAt:Date.now(),...(reason?{note:reason}:{})});
