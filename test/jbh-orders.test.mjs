@@ -787,3 +787,21 @@ test('confirmation remains pending with sender disabled and cannot send',async()
   await h.book.alarm();
   assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).attempts,0);
 });
+
+test('live private receipt rejects generic success and retries until exact durable acknowledgment',async()=>{
+  let attempts=0;const received=[];
+  const h=liveEnv({
+    JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_LIVE_RECEIPT_SECRET:'live-'+ 'r'.repeat(40),
+    JBH_PRIVATE_WORKER:{fetch:async req=>{const p=await req.json();received.push(p);attempts++;
+      if(attempts===1)return Response.json({received:true});
+      return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:'awaiting_owner_review',duplicate:false});
+    }}
+  });
+  const {orderId,sessionId}=await paidOrder(h);
+  const event={...completed('evt_live_ack',sessionId),livemode:true};
+  await worker.fetch(await signed(event),h.env);
+  assert.equal((await h.book.state.storage.get('private-receipt:'+orderId)).delivered,false);
+  await worker.fetch(await signed(event),h.env);
+  assert.equal((await h.book.state.storage.get('private-receipt:'+orderId)).delivered,true);
+  assert.equal(attempts,2);assert.deepEqual(received[0],received[1]);
+});
