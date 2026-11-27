@@ -461,8 +461,10 @@ export class JbhOrderBook{
       typeof e.JBH_CONFIRMATION_FROM==='string'&&/^[a-zA-Z0-9._+-]+@jussbeautifulhair\.com$/.test(e.JBH_CONFIRMATION_FROM);
   }
 
+  privateDeliveryConfig(){return jbhLive(this.env)&&Boolean(privateReceiptSettings(this.env));}
+
   async armConfirmation(){
-    if(!this.confirmationConfig())return;
+    if(!this.confirmationConfig()&&!this.privateDeliveryConfig())return;
     const storage=this.state.storage;
     const existing=await storage.getAlarm();
     if(existing===null||existing>Date.now()+1000)await storage.setAlarm(Date.now()+1000);
@@ -471,15 +473,65 @@ export class JbhOrderBook{
   // Serialize with payment/refund handlers. Re-arm before network I/O so a
   // crash after provider acceptance leaves a recoverable pending job.
   alarm(){
-    const run=this.tail.then(()=>this.processConfirmations());
+    const run=this.tail.then(()=>this.processDeliveryJobs());
     this.tail=run.catch(()=>{});
     return run;
+  }
+
+  async processDeliveryJobs(){
+    if(!this.privateDeliveryConfig()&&!this.confirmationConfig())return;
+    const storage=this.state.storage;
+    await storage.setAlarm(Date.now()+60000);
+    if(this.privateDeliveryConfig())await this.processPrivateDeliveries();
+    if(this.confirmationConfig())await this.processConfirmations();
+    const pendingPrivate=this.privateDeliveryConfig()&&(await storage.list({prefix:'private-pending:',limit:1})).size>0;
+    const pendingConfirmation=this.confirmationConfig()&&(await storage.list({prefix:'confirmation-pending:',limit:1})).size>0;
+    if(!pendingPrivate&&!pendingConfirmation)await storage.deleteAlarm();
+  }
+
+  async privateDeliveryPending(id){
+    const storage=this.state.storage;
+    const hold=await storage.get('private-hold:'+id);
+    if(hold&&hold.delivered!==true)return true;
+    const paid=await storage.get('private-receipt:'+id);
+    const order=await storage.get('order:'+id);
+    return Boolean(paid&&paid.delivered!==true&&order?.status==='paid');
+  }
+
+  async settlePrivateDelivery(id){
+    if(!jbhLive(this.env))return;
+    const storage=this.state.storage;
+    if(!await this.privateDeliveryPending(id)){
+      await storage.delete('private-pending:'+id);
+      await storage.delete('private-reconciliation:'+id);
+    }
+  }
+
+  async processPrivateDeliveries(){
+    const storage=this.state.storage;
+    // Bounded batch; pending records survive a crash and provider outage.
+    for(const [key,job] of await storage.list({prefix:'private-pending:',limit:20})){
+      const id=job.id;
+      if(!await this.privateDeliveryPending(id)){await this.settlePrivateDelivery(id);continue;}
+      if(job.nextAttemptAt>Date.now())continue;
+      if(job.attempts>=12){
+        await storage.transaction(async tx=>{
+          await tx.put('private-reconciliation:'+id,{reason:'receipt_retry_exhausted',attempts:job.attempts,at:Date.now()});
+          await tx.delete(key);
+        });
+        continue;
+      }
+      // Persist attempt before the network call; receiver deduplicates exact events.
+      await storage.put(key,{...job,attempts:job.attempts+1,nextAttemptAt:Date.now()+Math.min(3600000,60000*2**Math.min(job.attempts,6))});
+      await this.forwardPrivateHold(id);
+      await this.forwardPrivateReceipt(id);
+      await this.settlePrivateDelivery(id);
+    }
   }
 
   async processConfirmations(){
     if(!this.confirmationConfig())return;
     const storage=this.state.storage;
-    await storage.setAlarm(Date.now()+60000);
     const rows=await storage.list({prefix:'confirmation-pending:',limit:20});
     for(const [queueKey,id] of rows){
       const jobKey='confirmation:'+id;
@@ -522,14 +574,13 @@ export class JbhOrderBook{
         await tx.delete(queueKey);
       });
     }
-    if(!(await storage.list({prefix:'confirmation-pending:',limit:1})).size)await storage.deleteAlarm();
   }
 
   async event(event){
     const storage=this.state.storage;
     if(await storage.get(`event:${event.id}`)){
       const existing=await storage.get(`event:${event.id}`);
-      if(existing?.orderId){await this.forwardPrivateHold(existing.orderId);await this.forwardPrivateReceipt(existing.orderId);await this.armConfirmation();}
+      if(existing?.orderId){await this.armConfirmation();await this.forwardPrivateHold(existing.orderId);await this.forwardPrivateReceipt(existing.orderId);await this.settlePrivateDelivery(existing.orderId);}
       return json({received:true,duplicate:true});
     }
     const o=event.data?.object||{};
@@ -579,10 +630,12 @@ export class JbhOrderBook{
     }
 
     // Schedule before committing the outbox so a crash cannot strand an enabled job.
-    if(queue==='add'&&jbhLive(this.env))await this.armConfirmation();
+    const privateWork=jbhLive(this.env)&&(queue==='add'||(next&&['refunded','partially_refunded','disputed'].includes(next.status)));
+    if(privateWork)await this.armConfirmation();
     await storage.transaction(async txn=>{
       if(await txn.get(`event:${event.id}`))return;
       if(next){await txn.put(`order:${orderId}`,next);if(next.paymentIntent)await txn.put(`pi:${next.paymentIntent}`,orderId);}
+      if(privateWork)await txn.put(`private-pending:${orderId}`,{id:orderId,attempts:0,nextAttemptAt:0});
       if(fulfillment)await txn.put(`fulfillment:${orderId}`,fulfillment);
       if(next && ['refunded','partially_refunded','disputed'].includes(next.status)){
         await txn.put(`private-hold:${orderId}`,{delivered:false,payload:{eventId:event.id,livemode:jbhLive(this.env),orderId,paymentIntentId:next.paymentIntent,state:next.status}});
@@ -599,6 +652,7 @@ export class JbhOrderBook{
     });
     await this.forwardPrivateHold(orderId);
     await this.forwardPrivateReceipt(orderId);
+    await this.settlePrivateDelivery(orderId);
     return json({received:true});
   }
 }
