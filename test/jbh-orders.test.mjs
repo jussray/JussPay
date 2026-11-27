@@ -727,3 +727,63 @@ test('missing, short, wrong or deprovisioned bridge keys do not grant fulfillmen
   assert.equal((await worker.fetch(get('/jbh/fulfillment',validHeader),h.env)).status,401);
   assert.equal((await worker.fetch(get('/jbh/fulfillment',{'x-jbh-owner-key':OWNER_KEY}),h.env)).status,200);
 });
+
+test('verified live payment creates durable customer confirmation and retries with the same provider key',async()=>{
+  const calls=[];
+  const h=liveEnv({JBH_CONFIRMATIONS_ENABLED:'true',JBH_CONFIRMATION_FROM:'orders@jussbeautifulhair.com',JBH_RESEND_API_KEY:'re_test_fixture',JBH_EMAIL_FETCH:async(url,init)=>{
+    calls.push({url,headers:init.headers,body:JSON.parse(init.body)});
+    return calls.length===1?new Response('',{status:503}):Response.json({id:'email_fixture'});
+  }});
+  const storage=h.book.state.storage;
+  let alarm=null;storage.getAlarm=async()=>alarm;storage.setAlarm=async t=>{alarm=t;};storage.deleteAlarm=async()=>{alarm=null;};
+  const {orderId,sessionId}=await paidOrder(h);
+  assert.equal(await storage.get('confirmation:'+orderId),undefined);
+  const event={...completed('evt_confirm_paid',sessionId),livemode:true};
+  assert.equal((await worker.fetch(await signed(event),h.env)).status,200);
+  assert.equal((await storage.get('confirmation:'+orderId)).status,'pending');
+  assert.equal(calls.length,0);
+  assert.equal(typeof alarm,'number');
+  await h.book.alarm();
+  assert.equal(calls.length,1);
+  const job=await storage.get('confirmation:'+orderId);
+  assert.equal(job.status,'pending');
+  await storage.put('confirmation:'+orderId,{...job,nextAttemptAt:0});
+  await h.book.alarm();
+  assert.equal(calls.length,2);
+  assert.equal(calls[0].headers['Idempotency-Key'],calls[1].headers['Idempotency-Key']);
+  assert.deepEqual(calls[0].body,calls[1].body);
+  assert.equal(calls[1].body.to[0],'buyer@example.test');
+  assert.match(calls[1].body.text,/payment received/i);
+  assert.equal((await storage.get('confirmation:'+orderId)).status,'provider_accepted');
+  assert.equal((await worker.fetch(await signed(event),h.env)).status,200);
+  await h.book.alarm();
+  assert.equal(calls.length,2);
+});
+
+test('sandbox does not send customer email, even with live confirmation settings',async()=>{
+  const h=jbhEnv({JBH_CONFIRMATIONS_ENABLED:'true',JBH_CONFIRMATION_FROM:'orders@jussbeautifulhair.com',JBH_RESEND_API_KEY:'re_test_fixture',JBH_EMAIL_FETCH:()=>{throw Error('sandbox must not send')}});
+  const {orderId,sessionId}=await paidOrder(h);
+  assert.equal((await worker.fetch(await signed(completed('evt_confirm_test',sessionId)),h.env)).status,200);
+  assert.equal(await h.book.state.storage.get('confirmation:'+orderId),undefined);
+});
+
+test('refund before confirmation processing holds the job without contacting email provider',async()=>{
+  let sends=0;let alarm=null;
+  const h=liveEnv({JBH_CONFIRMATIONS_ENABLED:'true',JBH_CONFIRMATION_FROM:'orders@jussbeautifulhair.com',JBH_RESEND_API_KEY:'re_fixture',JBH_EMAIL_FETCH:async()=>{sends++;return Response.json({id:'fake'});}});
+  const storage=h.book.state.storage;
+  storage.getAlarm=async()=>alarm;storage.setAlarm=async t=>{alarm=t;};storage.deleteAlarm=async()=>{alarm=null;};
+  const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed({...completed('evt_confirm_hold_paid',sessionId),livemode:true}),h.env);
+  assert.equal((await worker.fetch(await signed({...refunded('evt_confirm_hold_refund'),livemode:true}),h.env)).status,200);
+  await h.book.alarm();
+  assert.equal(sends,0);
+  assert.equal((await storage.get('confirmation:'+orderId)).status,'held');
+});
+test('confirmation remains pending with sender disabled and cannot send',async()=>{
+  const h=liveEnv({JBH_CONFIRMATIONS_ENABLED:'false',JBH_EMAIL_FETCH:()=>{throw Error('not authorized')}});
+  const {orderId,sessionId}=await paidOrder(h);
+  assert.equal((await worker.fetch(await signed({...completed('evt_confirm_disabled',sessionId),livemode:true}),h.env)).status,200);
+  assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).status,'pending');
+  await h.book.alarm();
+  assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).attempts,0);
+});
