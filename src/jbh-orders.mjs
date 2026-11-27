@@ -156,6 +156,22 @@ export async function handleJbh(request,env){
       console.info('[JBH_STRIPE_WEBHOOK] processed',{...webhookContext,status:response.status,elapsedMs:Date.now()-webhookStartedAt});
       return response;
     }
+    if(path==='/jbh/monitoring-preflight'){
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      const key=env.JBH_MONITOR_KEY;
+      if(typeof key!=='string'||key.length<32||
+        [env.JBH_OWNER_KEY,env.JBH_OWNER_BRIDGE_KEY,env.JBH_STOREFRONT_KEY,env.JBH_STRIPE_SECRET_KEY,env.JBH_STRIPE_WEBHOOK_SECRET].some(value=>value===key)||
+        !await sameSecret(request.headers.get('x-jbh-monitor-key'),key))fail(401,'monitor_key_required');
+      const result=jbhConfigurationReview(env,{
+        ready:()=>jbhReady(env),catalog:()=>jbhCatalog(env),shipping:()=>jbhShipping(env),
+        owner:()=>requireLiveOwnerQueue(env),authority:items=>liveVendorAuthority(env,items)
+      });
+      const releaseSha=/^[a-f0-9]{40}$/.test(env.RELEASE_SHA||'')?env.RELEASE_SHA:null;
+      return new Response(JSON.stringify({schema:'jusspay/jbh-monitoring-preflight@v1',releaseSha,...result}),{
+        status:result.configurationValid?200:503,
+        headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store'}
+      });
+    }
     if(path==='/jbh/preflight'){
       if(request.method!=='GET')return json({error:'method_not_allowed'},405);
       await requireOwner(request,env);
