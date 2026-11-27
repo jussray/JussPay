@@ -56,7 +56,7 @@ export function jbhReady(env,webhook=false){
 }
 
 // The core Stripe client, pointed at the beauty account's own key and pinned version.
-export const jbhStripe=(env,path,method,data,key)=>stripe({STRIPE_SECRET_KEY:env.JBH_STRIPE_SECRET_KEY,STRIPE_API_VERSION:env.JBH_STRIPE_API_VERSION,STRIPE_FETCH:env.STRIPE_FETCH},path,method,data,key);
+export const jbhStripe=(env,path,method,data,key)=>stripe({STRIPE_LIVE:env.JBH_STRIPE_LIVE,STRIPE_SECRET_KEY:env.JBH_STRIPE_SECRET_KEY,STRIPE_API_VERSION:env.JBH_STRIPE_API_VERSION,STRIPE_FETCH:env.STRIPE_FETCH},path,method,data,key);
 
 async function jbhAccount(env,forPurchase){
   const a=await jbhStripe(env,'account');

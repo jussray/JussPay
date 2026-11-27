@@ -1,0 +1,16 @@
+dialog.jusspay-billing {
+  box-sizing:border-box; width:min(90vw, 31rem); max-height:85dvh; overflow:auto;
+  padding:clamp(1rem,5vw,2rem); border:1px solid #b49357; border-radius:1rem;
+  background:#10201b; color:#fff3d5; line-height:1.45;
+  box-shadow:0 16px 65px #000a;
+}
+dialog.jusspay-billing::backdrop {background:#07110ed9;}
+.jusspay-billing h2 { color:#f4d388; margin:0 0 .75rem; font-size:clamp(1.25rem,6vw,1.7rem); }
+.jusspay-billing a { color:#ffe5a5; text-decoration:underline; }
+.jusspay-billing button {
+  display:block; margin:.75rem 0 0; padding:.65em 1em; border:1px solid #c6a467;
+  border-radius:.45em; cursor:pointer; background:#1e3d2d; color:#fff3d5;
+}
+.jusspay-billing :is(a,button,input):focus-visible { outline:2px solid #fff0ab; outline-offset:3px; }
+.jusspay-billing button:disabled { opacity:.7; cursor:wait; }
+.jusspay-billing form { margin:.75rem 0; }

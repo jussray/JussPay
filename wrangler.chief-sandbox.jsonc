@@ -1,0 +1,22 @@
+{
+  // Deliberately separate from JBH and production. Nothing charges by default.
+  "name": "jusspay-chief-sandbox",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [{"binding":"AUTH","service":"jusspay-auth-sandbox"}],
+  "durable_objects": {"bindings":[{"name":"BILLING","class_name":"BillingAccount"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["BillingAccount"]}],
+  "vars": {
+    "STRIPE_LIVE":"false",
+    "PAYMENTS_ENABLED":"false",
+    "INTRODUCTORY_OFFERS_ENABLED":"false",
+    "CHIEF_LIVE_INTRO_APPROVED":"false",
+    "SUBSCRIPTIONS_TEST_ENABLED":"false",
+    "JBH_ORDERS_ENABLED":"false",
+    "JBH_STRIPE_LIVE":"false",
+    "JBH_LIVE_CHARGES_APPROVED":"false",
+    "APPROVED_PLANS":"{}"
+  }
+}
