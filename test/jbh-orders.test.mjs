@@ -447,6 +447,8 @@ test('signed refund hold is forwarded and replay does not duplicate a delivered 
 
 // Live-mode behavior is tested only with fake provider responses. No real Stripe calls.
 const liveEnv=(overrides={})=>jbhEnv({
+  JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:'true',
+  JBH_PRIVATE_LIVE_RECEIPT_SECRET:'live-fixture-'+ 'r'.repeat(40),
   JBH_STRIPE_LIVE:'true',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE',
   JBH_LIVE_CHARGES_APPROVED:'true',
   // Fake receipts exist only in the test provider harness, never production.
@@ -456,7 +458,17 @@ const liveEnv=(overrides={})=>jbhEnv({
       ownerHandoffVerified:true,verifiedAt:Date.now(),
       skus:['BRAZ-SEW-BW-10-12-14','BRAZ-TRANS-CLO-DW-12']}
   }),
-  ...overrides
+  ...overrides,
+  JBH_PRIVATE_WORKER:overrides.JBH_PRIVATE_WORKER===null?null:{fetch:async request=>{
+    const path=new URL(request.url).pathname;
+    if(path==='/internal/jusspay/live/readiness'){
+      if(overrides.__privateReadinessResponse)return overrides.__privateReadinessResponse();
+      return Response.json({schema:'jbh-private/jusspay-live-readiness@v1',livemode:true,configured:true,releaseSha:'a'.repeat(40)});
+    }
+    if(overrides.JBH_PRIVATE_WORKER?.fetch)return overrides.JBH_PRIVATE_WORKER.fetch(request);
+    const p=await request.json();
+    return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:p.state==='awaiting_owner_dispatch'?'awaiting_owner_review':'hold',duplicate:false});
+  }}
 });
 
 
@@ -587,7 +599,7 @@ test('live paid orders forward a signed live-only receipt to the isolated privat
   const delivered=[];
   const h=liveEnv({
     JBH_PRIVATE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
-    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);return Response.json({received:true});}}
+    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);const p=await request.clone().json();return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:'awaiting_owner_review',duplicate:false});}}
   });
   const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed({...completed('evt_live_private',sessionId),livemode:true}),h.env);
@@ -786,4 +798,65 @@ test('confirmation remains pending with sender disabled and cannot send',async()
   assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).status,'pending');
   await h.book.alarm();
   assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).attempts,0);
+});
+
+test('live private receipt rejects generic success and retries until exact durable acknowledgment',async()=>{
+  let attempts=0;const received=[];
+  const h=liveEnv({
+    JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_LIVE_RECEIPT_SECRET:'live-'+ 'r'.repeat(40),
+    JBH_PRIVATE_WORKER:{fetch:async req=>{const p=await req.json();received.push(p);attempts++;
+      if(attempts===1)return Response.json({received:true});
+      return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:'awaiting_owner_review',duplicate:false});
+    }}
+  });
+  const {orderId,sessionId}=await paidOrder(h);
+  const event={...completed('evt_live_ack',sessionId),livemode:true};
+  await worker.fetch(await signed(event),h.env);
+  assert.equal((await h.book.state.storage.get('private-receipt:'+orderId)).delivered,false);
+  await worker.fetch(await signed(event),h.env);
+  assert.equal((await h.book.state.storage.get('private-receipt:'+orderId)).delivered,true);
+  assert.equal(attempts,2);assert.deepEqual(received[0],received[1]);
+});
+
+test('live checkout refuses missing or unhealthy private receipt storage before Stripe',async()=>{
+  for(const env of [{JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:'false'},{JBH_PRIVATE_WORKER:null},{JBH_PRIVATE_LIVE_RECEIPT_SECRET:'short'},{__privateReadinessResponse:()=>Response.json({configured:true})},{__privateReadinessResponse:()=>new Response('{}',{status:503})}]){
+    const sku='BRAZ-SEW-BW-10-12-14';
+    const h=liveEnv({...env,JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})});
+    const health=await worker.fetch(get('/jbh/health',sf),h.env);
+    assert.equal(health.status,503);
+    assert.match((await health.json()).error,/private_receipt/);
+    const checkout=await worker.fetch(post('/jbh/checkout',{items:[{sku,quantity:1}]},sf),h.env);
+    assert.equal(checkout.status,503);
+    assert.match((await checkout.json()).error,/private_receipt/);
+    assert.equal(h.calls.length,0);
+  }
+});
+
+test('private receiver retry alarm recovers a transient failure without a new Stripe event',async()=>{
+  let sends=0;let alarm=null;
+  const h=liveEnv({JBH_PRIVATE_WORKER:{fetch:async req=>{
+    const p=await req.json();sends++;
+    if(sends===1)return new Response('{}',{status:503});
+    return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:'awaiting_owner_review',duplicate:false});
+  }}});
+  const storage=h.book.state.storage;
+  storage.getAlarm=async()=>alarm;storage.setAlarm=async t=>{alarm=t;};storage.deleteAlarm=async()=>{alarm=null;};
+  const {orderId,sessionId}=await paidOrder(h);
+  const event={...completed('evt_private_alarm',sessionId),livemode:true};
+  assert.equal((await worker.fetch(await signed(event),h.env)).status,200);
+  assert.equal((await storage.get('private-receipt:'+orderId)).delivered,false);
+  assert.equal(typeof alarm,'number');
+  await h.book.alarm();
+  assert.equal(sends,2);
+  assert.equal((await storage.get('private-receipt:'+orderId)).delivered,true);
+  assert.equal(await storage.get('private-pending:'+orderId),undefined);
+});
+
+test('owner cannot mark a live order dispatched without private receipt acceptance',async()=>{
+  const h=liveEnv({JBH_PRIVATE_WORKER:{fetch:async()=>Response.json({received:true})}});
+  const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed({...completed('evt_private_dispatch_gate',sessionId),livemode:true}),h.env);
+  const r=await worker.fetch(post('/jbh/fulfillment/'+orderId+'/dispatched',{}, {'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(r.status,409);assert.equal((await r.json()).error,'private_receipt_unconfirmed');
+  assert.equal((await queue(h))[0].status,'awaiting_owner_dispatch');
 });

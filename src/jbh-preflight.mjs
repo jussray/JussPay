@@ -26,6 +26,7 @@ export function jbhConfigurationReview(env,checks){
   if(catalog.ok&&!items.length)blockers.push('catalog_empty');
   check('shipping_invalid',checks.shipping);
   check('owner_queue_invalid',checks.owner);
+  if(checks.privateReceiver)check('private_receipt_configuration_invalid',checks.privateReceiver);
   if(items.length)check('vendor_authority_unverified',()=>checks.authority(items));
   else blockers.push('vendor_authority_unverified');
   return {mode:'configuration-review-only',configurationValid:blockers.length===0,blockers,ready:false,providerVerified:false,chargesCollected:false,orderDispatched:false};
