@@ -447,6 +447,8 @@ test('signed refund hold is forwarded and replay does not duplicate a delivered 
 
 // Live-mode behavior is tested only with fake provider responses. No real Stripe calls.
 const liveEnv=(overrides={})=>jbhEnv({
+  JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:'true',
+  JBH_PRIVATE_LIVE_RECEIPT_SECRET:'live-fixture-'+ 'r'.repeat(40),
   JBH_STRIPE_LIVE:'true',JBH_STRIPE_SECRET_KEY:'sk_live_FAKE',
   JBH_LIVE_CHARGES_APPROVED:'true',
   // Fake receipts exist only in the test provider harness, never production.
@@ -456,7 +458,17 @@ const liveEnv=(overrides={})=>jbhEnv({
       ownerHandoffVerified:true,verifiedAt:Date.now(),
       skus:['BRAZ-SEW-BW-10-12-14','BRAZ-TRANS-CLO-DW-12']}
   }),
-  ...overrides
+  ...overrides,
+  JBH_PRIVATE_WORKER:overrides.JBH_PRIVATE_WORKER===null?null:{fetch:async request=>{
+    const path=new URL(request.url).pathname;
+    if(path==='/internal/jusspay/live/readiness'){
+      if(overrides.__privateReadinessResponse)return overrides.__privateReadinessResponse();
+      return Response.json({schema:'jbh-private/jusspay-live-readiness@v1',livemode:true,configured:true,releaseSha:'a'.repeat(40)});
+    }
+    if(overrides.JBH_PRIVATE_WORKER?.fetch)return overrides.JBH_PRIVATE_WORKER.fetch(request);
+    const p=await request.json();
+    return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:p.state==='awaiting_owner_dispatch'?'awaiting_owner_review':'hold',duplicate:false});
+  }}
 });
 
 
@@ -587,7 +599,7 @@ test('live paid orders forward a signed live-only receipt to the isolated privat
   const delivered=[];
   const h=liveEnv({
     JBH_PRIVATE_RECEIPTS_ENABLED:'true',JBH_PRIVATE_RECEIPT_SECRET:'r'.repeat(40),
-    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);return Response.json({received:true});}}
+    JBH_PRIVATE_WORKER:{async fetch(request){delivered.push(request);const p=await request.clone().json();return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:'awaiting_owner_review',duplicate:false});}}
   });
   const {orderId,sessionId}=await paidOrder(h);
   const r=await worker.fetch(await signed({...completed('evt_live_private',sessionId),livemode:true}),h.env);
@@ -804,4 +816,18 @@ test('live private receipt rejects generic success and retries until exact durab
   await worker.fetch(await signed(event),h.env);
   assert.equal((await h.book.state.storage.get('private-receipt:'+orderId)).delivered,true);
   assert.equal(attempts,2);assert.deepEqual(received[0],received[1]);
+});
+
+test('live checkout refuses missing or unhealthy private receipt storage before Stripe',async()=>{
+  for(const env of [{JBH_PRIVATE_LIVE_RECEIPTS_ENABLED:'false'},{JBH_PRIVATE_WORKER:null},{JBH_PRIVATE_LIVE_RECEIPT_SECRET:'short'},{__privateReadinessResponse:()=>Response.json({configured:true})},{__privateReadinessResponse:()=>new Response('{}',{status:503})}]){
+    const sku='BRAZ-SEW-BW-10-12-14';
+    const h=liveEnv({...env,JBH_CATALOG:JSON.stringify({[sku]:CATALOG[sku]})});
+    const health=await worker.fetch(get('/jbh/health',sf),h.env);
+    assert.equal(health.status,503);
+    assert.match((await health.json()).error,/private_receipt/);
+    const checkout=await worker.fetch(post('/jbh/checkout',{items:[{sku,quantity:1}]},sf),h.env);
+    assert.equal(checkout.status,503);
+    assert.match((await checkout.json()).error,/private_receipt/);
+    assert.equal(h.calls.length,0);
+  }
 });
