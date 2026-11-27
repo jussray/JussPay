@@ -831,3 +831,32 @@ test('live checkout refuses missing or unhealthy private receipt storage before 
     assert.equal(h.calls.length,0);
   }
 });
+
+test('private receiver retry alarm recovers a transient failure without a new Stripe event',async()=>{
+  let sends=0;let alarm=null;
+  const h=liveEnv({JBH_PRIVATE_WORKER:{fetch:async req=>{
+    const p=await req.json();sends++;
+    if(sends===1)return new Response('{}',{status:503});
+    return Response.json({schema:'jbh-private/jusspay-live-receipt@v1',received:true,livemode:true,orderId:p.orderId,eventId:p.eventId,state:'awaiting_owner_review',duplicate:false});
+  }}});
+  const storage=h.book.state.storage;
+  storage.getAlarm=async()=>alarm;storage.setAlarm=async t=>{alarm=t;};storage.deleteAlarm=async()=>{alarm=null;};
+  const {orderId,sessionId}=await paidOrder(h);
+  const event={...completed('evt_private_alarm',sessionId),livemode:true};
+  assert.equal((await worker.fetch(await signed(event),h.env)).status,200);
+  assert.equal((await storage.get('private-receipt:'+orderId)).delivered,false);
+  assert.equal(typeof alarm,'number');
+  await h.book.alarm();
+  assert.equal(sends,2);
+  assert.equal((await storage.get('private-receipt:'+orderId)).delivered,true);
+  assert.equal(await storage.get('private-pending:'+orderId),undefined);
+});
+
+test('owner cannot mark a live order dispatched without private receipt acceptance',async()=>{
+  const h=liveEnv({JBH_PRIVATE_WORKER:{fetch:async()=>Response.json({received:true})}});
+  const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed({...completed('evt_private_dispatch_gate',sessionId),livemode:true}),h.env);
+  const r=await worker.fetch(post('/jbh/fulfillment/'+orderId+'/dispatched',{}, {'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(r.status,409);assert.equal((await r.json()).error,'private_receipt_unconfirmed');
+  assert.equal((await queue(h))[0].status,'awaiting_owner_dispatch');
+});
