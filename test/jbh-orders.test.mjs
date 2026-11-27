@@ -766,3 +766,24 @@ test('sandbox does not send customer email, even with live confirmation settings
   assert.equal((await worker.fetch(await signed(completed('evt_confirm_test',sessionId)),h.env)).status,200);
   assert.equal(await h.book.state.storage.get('confirmation:'+orderId),undefined);
 });
+
+test('refund before confirmation processing holds the job without contacting email provider',async()=>{
+  let sends=0;let alarm=null;
+  const h=liveEnv({JBH_CONFIRMATIONS_ENABLED:'true',JBH_CONFIRMATION_FROM:'orders@jussbeautifulhair.com',JBH_RESEND_API_KEY:'re_fixture',JBH_EMAIL_FETCH:async()=>{sends++;return Response.json({id:'fake'});}});
+  const storage=h.book.state.storage;
+  storage.getAlarm=async()=>alarm;storage.setAlarm=async t=>{alarm=t;};storage.deleteAlarm=async()=>{alarm=null;};
+  const {orderId,sessionId}=await paidOrder(h);
+  await worker.fetch(await signed({...completed('evt_confirm_hold_paid',sessionId),livemode:true}),h.env);
+  assert.equal((await worker.fetch(await signed({...refunded('evt_confirm_hold_refund'),livemode:true}),h.env)).status,200);
+  await h.book.alarm();
+  assert.equal(sends,0);
+  assert.equal((await storage.get('confirmation:'+orderId)).status,'held');
+});
+test('confirmation remains pending with sender disabled and cannot send',async()=>{
+  const h=liveEnv({JBH_CONFIRMATIONS_ENABLED:'false',JBH_EMAIL_FETCH:()=>{throw Error('not authorized')}});
+  const {orderId,sessionId}=await paidOrder(h);
+  assert.equal((await worker.fetch(await signed({...completed('evt_confirm_disabled',sessionId),livemode:true}),h.env)).status,200);
+  assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).status,'pending');
+  await h.book.alarm();
+  assert.equal((await h.book.state.storage.get('confirmation:'+orderId)).attempts,0);
+});
