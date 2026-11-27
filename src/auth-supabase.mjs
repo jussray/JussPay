@@ -25,7 +25,9 @@ export default {async fetch(request,env){
     const r=await (env.SUPABASE_FETCH||fetch)(`${origin}/auth/v1/user`,{method:'GET',headers:{authorization,apikey:env.SUPABASE_API_KEY},redirect:'error',signal:AbortSignal.timeout(5000)});
     if(!r.ok)return json({error:r.status>=500?'auth_provider_unavailable':'invalid_token'},r.status>=500?503:401);
     const user=await r.json();
-    if(user.id!==claims.sub||user.aud!=='authenticated'||user.is_anonymous===true||claims.exp<=Date.now()/1000)return json({error:'invalid_token'},401);
+    // Only the provider-confirmed user record may establish verified account status.
+    const confirmedAt=typeof user?.email_confirmed_at==='string'?Date.parse(user.email_confirmed_at):NaN;
+    if(user?.id!==claims.sub||user.aud!=='authenticated'||user.is_anonymous!==false||!Number.isFinite(confirmedAt)||confirmedAt>Date.now()||claims.exp<=Date.now()/1000)return json({error:'invalid_token'},401);
     return json({subject:`${issuer}#${user.id}`,audience:'jusspay',expiresAt:claims.exp});
   }catch{return json({error:'auth_provider_unavailable'},503);}
 }};
