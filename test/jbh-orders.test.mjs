@@ -32,7 +32,12 @@ function jbhEnv(overrides={}){
         const k=init.headers['Idempotency-Key'];if(byKey.has(k))return Response.json(sessions.get(byKey.get(k)));
         const b=Object.fromEntries(init.body);const live=env.JBH_STRIPE_LIVE==='true';const id=`cs_${live?'live':'test'}_${sessions.size+1}`;byKey.set(k,id);
         intents.set(`pi_${live?'live':'test'}_${sessions.size+1}`,{id:`pi_${live?'live':'test'}_${sessions.size+1}`,livemode:live,metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
-        let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++)subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(b[`line_items[${i}][price_data][unit_amount]`]);
+        let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++){
+          const priceId=b[`line_items[${i}][price]`];
+          const amount=priceId?env.__priceFixtures?.[priceId]?.unit_amount:b[`line_items[${i}][price_data][unit_amount]`];
+          if(!Number.isSafeInteger(Number(amount)))return new Response('{}',{status:400});
+          subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(amount);
+        }
         const shipping=Number(b['shipping_options[0][shipping_rate_data][fixed_amount][amount]']);
         sessions.set(id,{id,object:'checkout.session',mode:'payment',livemode:live,currency:'usd',client_reference_id:b.client_reference_id,metadata:{jbh_order_id:b['metadata[jbh_order_id]']},amount_subtotal:subtotal,amount_total:subtotal+shipping,total_details:{amount_shipping:shipping},payment_status:'unpaid',status:'open',url:`https://checkout.stripe.com/c/pay/${id}`});
         return Response.json(sessions.get(id));
@@ -883,4 +888,79 @@ test('order book independently rejects stale checkout mode before storage or pro
   }
   assert.equal(h.calls.length,0);
   assert.equal((await h.book.state.storage.list({prefix:'order:'})).size,0);
+});
+
+
+test('owner-only catalog export returns exact configured SKUs without exposing credentials or extra fields',async()=>{
+  const h=jbhEnv({JBH_CATALOG:JSON.stringify({...CATALOG,'OTHER-01':{approved:true,name:'Other',unitAmount:1000,currency:'usd',vendor:'manual-procurement',privateNote:'never-export'}})});
+  for(const headers of [{},sf,{'x-jbh-owner-key':'wrong'}]){
+    const denied=await worker.fetch(get('/jbh/catalog-export',headers),h.env);
+    assert.equal(denied.status,401);
+  }
+  const response=await worker.fetch(get('/jbh/catalog-export',{'x-jbh-owner-key':OWNER_KEY}),h.env);
+  assert.equal(response.status,200);
+  assert.equal(response.headers.get('cache-control'),'no-store');
+  const exported=await response.json();
+  assert.equal(exported.schema,'jusspay/jbh-catalog-export@v1');
+  assert.equal(exported.livemode,false);
+  assert.equal(Object.keys(exported.catalog).length,4);
+  assert.deepEqual(exported.catalog['JBH-BS-14'],CATALOG['JBH-BS-14']);
+  assert.equal(Object.hasOwn(exported.catalog['OTHER-01'],'privateNote'),false);
+  assert.equal(exported.supplierProviderVerified,false);
+  assert.equal(h.calls.length,0);
+});
+
+function persistentFixture(overrides={}){
+  const sku='JBH-BS-14',priceId='price_jbhfixture',productId='prod_jbhfixture';
+  const item=CATALOG[sku];
+  const h=jbhEnv({JBH_CATALOG:JSON.stringify({[sku]:item}),
+    JBH_PERSISTENT_PRICES_ENABLED:'true',
+    JBH_STRIPE_PRICE_MAP:JSON.stringify({[sku]:{priceId,productId}})});
+  const original=h.env.STRIPE_FETCH;
+  const price={id:priceId,active:true,livemode:false,type:'one_time',billing_scheme:'per_unit',
+    currency:'usd',unit_amount:item.unitAmount,product:productId,lookup_key:sku,metadata:{jbh_sku:sku},...overrides};
+  h.env.__priceFixtures={[priceId]:price};
+  h.env.STRIPE_FETCH=async(url,init={})=>{
+    if(String(url).endsWith('/prices/'+priceId)){
+      h.calls.push({path:'prices/'+priceId,method:init.method||'GET'});
+      return Response.json(price);
+    }
+    return original(url,init);
+  };
+  return {h,sku,priceId,productId};
+}
+test('persistent pricing sends only the verified Price ID and never client amounts or inline price data',async()=>{
+  const {h,sku,priceId}=persistentFixture();
+  const response=await worker.fetch(post('/jbh/checkout',{items:[{sku,quantity:1,unitAmount:1,priceId:'price_client'}]},{...sf,'x-jbh-checkout-mode':'sandbox'}),h.env);
+  assert.equal(response.status,200);
+  const chargeCapable=h.calls.find(c=>c.path==='checkout/sessions');
+  assert.equal(chargeCapable.body['line_items[0][price]'],priceId);
+  assert.equal([...h.sessions.values()][0].amount_subtotal,CATALOG[sku].unitAmount);
+  assert.equal(Object.keys(chargeCapable.body).some(k=>k.startsWith('line_items[0][price_data]')),false);
+  assert.ok(h.calls.findIndex(c=>c.path==='prices/'+priceId)<h.calls.findIndex(c=>c.path==='checkout/sessions'));
+});
+test('persistent pricing refuses mismatched Stripe SKU, amount, mode, or product without opening a session',async()=>{
+  for(const overrides of [{unit_amount:1},{livemode:true},{metadata:{jbh_sku:'OTHER-01'}},{product:'prod_other'},{active:false},{lookup_key:'OTHER-01'}]){
+    const {h,sku}=persistentFixture(overrides);
+    const response=await worker.fetch(post('/jbh/checkout',{items:[{sku,quantity:1}]},{...sf,'x-jbh-checkout-mode':'sandbox'}),h.env);
+    assert.equal(response.status,503);
+    assert.equal(h.calls.some(c=>c.path==='checkout/sessions'),false);
+  }
+});
+test('persistent mode requires a complete unique server-side Price ID mapping',()=>{
+  const {h,sku,priceId,productId}=persistentFixture();
+  h.env.JBH_STRIPE_PRICE_MAP='{}';
+  assert.throws(()=>priceOrder(h.env,{items:[{sku,quantity:1}]}),{message:'jbh_stripe_price_map_invalid'});
+  h.env.JBH_CATALOG=JSON.stringify({...CATALOG});
+  h.env.JBH_STRIPE_PRICE_MAP=JSON.stringify(Object.fromEntries(Object.keys(CATALOG).map(key=>[key,{priceId,productId}])));
+  assert.throws(()=>priceOrder(h.env,{items:[{sku,quantity:1}]}),{message:'jbh_stripe_price_map_invalid'});
+});
+test('a changed Price ID cannot reuse the original request idempotency key',async()=>{
+  const {h,sku,productId}=persistentFixture();
+  const body={requestId:crypto.randomUUID(),items:[{sku,quantity:1}]};
+  const headers={...sf,'x-jbh-checkout-mode':'sandbox'};
+  assert.equal((await worker.fetch(post('/jbh/checkout',body,headers),h.env)).status,200);
+  h.env.JBH_STRIPE_PRICE_MAP=JSON.stringify({[sku]:{priceId:'price_changed',productId}});
+  assert.equal((await worker.fetch(post('/jbh/checkout',body,headers),h.env)).status,409);
+  assert.equal(h.calls.filter(c=>c.path==='checkout/sessions').length,1);
 });
