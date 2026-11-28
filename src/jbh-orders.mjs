@@ -72,8 +72,39 @@ export async function sameSecret(given,expected){
   return diff===0;
 }
 
+// The opt-in migration preserves existing checkout until a complete mapping is reviewed.
+// Never derive a Stripe Price ID from a shopper's input or supplier identifier.
+function persistentPriceMap(env,catalog){
+  const enabled=env.JBH_PERSISTENT_PRICES_ENABLED;
+  if(enabled===undefined||enabled==='false')return null;
+  if(enabled!=='true')fail(503,'jbh_stripe_price_map_invalid');
+  let map;try{map=JSON.parse(env.JBH_STRIPE_PRICE_MAP||'null');}catch{fail(503,'jbh_stripe_price_map_invalid');}
+  if(!map||typeof map!=='object'||Array.isArray(map)||Object.keys(map).length!==Object.keys(catalog).length)fail(503,'jbh_stripe_price_map_invalid');
+  const seen=new Set();
+  for(const sku of Object.keys(catalog)){
+    const item=Object.hasOwn(map,sku)?map[sku]:null;
+    if(!item||!/^price_[A-Za-z0-9]+$/.test(item.priceId||'')||!/^prod_[A-Za-z0-9]+$/.test(item.productId||'')||seen.has(item.priceId))fail(503,'jbh_stripe_price_map_invalid');
+    seen.add(item.priceId);
+  }
+  return map;
+}
+
+async function verifyPersistentPrices(env,items){
+  for(const x of items){
+    if(!x.stripePriceId)continue;
+    let p;
+    try{p=await jbhStripe(env,'prices/'+encodeURIComponent(x.stripePriceId));}
+    catch{fail(503,'jbh_stripe_price_unverified');}
+    if(!p||p.id!==x.stripePriceId||p.product!==x.stripeProductId||p.livemode!==jbhLive(env)||p.active!==true||
+      p.type!=='one_time'||p.billing_scheme!=='per_unit'||p.currency!=='usd'||p.unit_amount!==x.unitAmount||
+      p.lookup_key!==x.sku||p.metadata?.jbh_sku!==x.sku||(p.metadata?.sku&&p.metadata.sku!==x.sku)||
+      p.custom_unit_amount||p.transform_quantity)fail(503,'jbh_stripe_price_unverified');
+  }
+}
+
 export function priceOrder(env,input){
   const catalog=jbhCatalog(env),ship=jbhShipping(env);
+  const priceMap=persistentPriceMap(env,catalog);
   const lines=input?.items;
   if(!Array.isArray(lines)||!lines.length||lines.length>MAX_LINES)fail(400,'invalid_items');
   if(input.shipping!==undefined&&input.shipping!=='standard'&&input.shipping!=='express')fail(400,'invalid_shipping');
@@ -86,7 +117,8 @@ export function priceOrder(env,input){
   }
   const items=[...merged].map(([sku,quantity])=>{
     if(quantity>MAX_QTY)fail(400,'invalid_items');
-    const p=catalog[sku];return {sku,name:p.name,vendor:p.vendor,unitAmount:p.unitAmount,quantity};
+    const p=catalog[sku],binding=priceMap?.[sku];return {sku,name:p.name,vendor:p.vendor,unitAmount:p.unitAmount,quantity,
+      ...(binding?{stripePriceId:binding.priceId,stripeProductId:binding.productId}:{})};
   });
   const subtotal=items.reduce((n,x)=>n+x.unitAmount*x.quantity,0);
   const speed=input.shipping==='express'?'express':'standard';
@@ -229,7 +261,9 @@ export async function handleJbh(request,env){
       const live=jbhLive(env);
       if(live&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
       requireLiveOwnerQueue(env);
-      if(Object.keys(jbhCatalog(env)).length===0)fail(503,'jbh_catalog_unavailable');
+      const catalog=jbhCatalog(env);
+      if(Object.keys(catalog).length===0)fail(503,'jbh_catalog_unavailable');
+      persistentPriceMap(env,catalog);
       jbhShipping(env);
       if(live)liveVendorAuthority(env,Object.entries(jbhCatalog(env)).map(([sku,p])=>({sku,vendor:p.vendor})));
       await requireLivePrivateReceiverReady(env);
@@ -258,6 +292,25 @@ export async function handleJbh(request,env){
       const id=path.slice('/jbh/orders/'.length);
       if(!ORDER_ID.test(id))fail(404,'not_found');
       return toBook(env,'/order',{id});
+    }
+    if(path==='/jbh/catalog-export'){
+      // Owner credential only: never return credentials, PII, or arbitrary catalog fields.
+      await requireOwner(request,env);
+      if(request.method!=='GET')return json({error:'method_not_allowed'},405);
+      const catalog=jbhCatalog(env);
+      const rows=Object.entries(catalog);
+      if(!rows.length)fail(503,'jbh_catalog_unavailable');
+      const live=jbhLive(env);
+      const supplierConfiguration=Object.fromEntries(rows.map(([sku,p])=>{
+        if(!live)return [sku,{configured:false,reason:'sandbox'}];
+        try{liveVendorAuthority(env,[{sku,vendor:p.vendor}]);return [sku,{configured:true}];}
+        catch(e){return [sku,{configured:false,reason:e.status?e.message:'configuration_unavailable'}];}
+      }));
+      return new Response(JSON.stringify({
+        schema:'jusspay/jbh-catalog-export@v1',livemode:live,
+        catalog:Object.fromEntries(rows.map(([sku,{approved,name,unitAmount,currency,vendor}])=>[sku,{approved,name,unitAmount,currency,vendor}])),
+        supplierConfiguration,supplierProviderVerified:false
+      }),{headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store'}});
     }
     if(path==='/jbh/launch-readiness'){
       // Owner-only, no-provider-call preflight. Configuration evidence is not
@@ -357,7 +410,7 @@ export class JbhOrderBook{
     const env=this.env,storage=this.state.storage;
     requireCheckoutMode(env,expectedMode);
     if(jbhLive(env)&&env.JBH_LIVE_CHARGES_APPROVED!=='true')fail(503,'jbh_live_not_approved');
-    const fingerprint=await digest(JSON.stringify([priced.items.map(x=>[x.sku,x.quantity,x.unitAmount]),priced.shipping,priced.total]));
+    const fingerprint=await digest(JSON.stringify([priced.items.map(x=>[x.sku,x.quantity,x.unitAmount,...(x.stripePriceId?[x.stripePriceId,x.stripeProductId]:[])]),priced.shipping,priced.total]));
     let id=await storage.get(`request:${requestId}`);
     let order=id?await storage.get(`order:${id}`):null;
     if(order){
@@ -382,14 +435,19 @@ export class JbhOrderBook{
       'shipping_options[0][shipping_rate_data][fixed_amount][currency]':'usd'};
     order.items.forEach((x,i)=>{
       form[`line_items[${i}][quantity]`]=String(x.quantity);
-      form[`line_items[${i}][price_data][currency]`]='usd';
-      form[`line_items[${i}][price_data][unit_amount]`]=String(x.unitAmount);
-      form[`line_items[${i}][price_data][product_data][name]`]=x.name;
-      form[`line_items[${i}][price_data][product_data][metadata][jbh_sku]`]=x.sku;
+      if(x.stripePriceId){
+        form[`line_items[${i}][price]`]=x.stripePriceId;
+      }else{
+        form[`line_items[${i}][price_data][currency]`]='usd';
+        form[`line_items[${i}][price_data][unit_amount]`]=String(x.unitAmount);
+        form[`line_items[${i}][price_data][product_data][name]`]=x.name;
+        form[`line_items[${i}][price_data][product_data][metadata][jbh_sku]`]=x.sku;
+      }
     });
     // Recheck configuration and merchant inside the order book immediately before the charge-capable request.
     requireLivePrivateReceiptConfig(env);
     await jbhAccount(env,true);
+    await verifyPersistentPrices(env,order.items);
     const s=await jbhStripe(env,'checkout/sessions','POST',form,`jbh-checkout-${id}`);
     if(!new RegExp(`^cs_${jbhLive(env)?'live':'test'}_`).test(s.id||'')||s.livemode!==jbhLive(env)||typeof s.url!=='string')fail(502,'stripe_unavailable');
     await storage.put(`order:${id}`,{...order,sessionId:s.id,sessionUrl:s.url});
