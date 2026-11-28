@@ -32,7 +32,12 @@ function jbhEnv(overrides={}){
         const k=init.headers['Idempotency-Key'];if(byKey.has(k))return Response.json(sessions.get(byKey.get(k)));
         const b=Object.fromEntries(init.body);const live=env.JBH_STRIPE_LIVE==='true';const id=`cs_${live?'live':'test'}_${sessions.size+1}`;byKey.set(k,id);
         intents.set(`pi_${live?'live':'test'}_${sessions.size+1}`,{id:`pi_${live?'live':'test'}_${sessions.size+1}`,livemode:live,metadata:{jbh_order_id:b['payment_intent_data[metadata][jbh_order_id]']}});
-        let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++)subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(b[`line_items[${i}][price_data][unit_amount]`]);
+        let subtotal=0;for(let i=0;b[`line_items[${i}][quantity]`];i++){
+          const priceId=b[`line_items[${i}][price]`];
+          const amount=priceId?env.__priceFixtures?.[priceId]?.unit_amount:b[`line_items[${i}][price_data][unit_amount]`];
+          if(!Number.isSafeInteger(Number(amount)))return new Response('{}',{status:400});
+          subtotal+=Number(b[`line_items[${i}][quantity]`])*Number(amount);
+        }
         const shipping=Number(b['shipping_options[0][shipping_rate_data][fixed_amount][amount]']);
         sessions.set(id,{id,object:'checkout.session',mode:'payment',livemode:live,currency:'usd',client_reference_id:b.client_reference_id,metadata:{jbh_order_id:b['metadata[jbh_order_id]']},amount_subtotal:subtotal,amount_total:subtotal+shipping,total_details:{amount_shipping:shipping},payment_status:'unpaid',status:'open',url:`https://checkout.stripe.com/c/pay/${id}`});
         return Response.json(sessions.get(id));
@@ -914,6 +919,7 @@ function persistentFixture(overrides={}){
   const original=h.env.STRIPE_FETCH;
   const price={id:priceId,active:true,livemode:false,type:'one_time',billing_scheme:'per_unit',
     currency:'usd',unit_amount:item.unitAmount,product:productId,lookup_key:sku,metadata:{jbh_sku:sku},...overrides};
+  h.env.__priceFixtures={[priceId]:price};
   h.env.STRIPE_FETCH=async(url,init={})=>{
     if(String(url).endsWith('/prices/'+priceId)){
       h.calls.push({path:'prices/'+priceId,method:init.method||'GET'});
@@ -929,6 +935,7 @@ test('persistent pricing sends only the verified Price ID and never client amoun
   assert.equal(response.status,200);
   const chargeCapable=h.calls.find(c=>c.path==='checkout/sessions');
   assert.equal(chargeCapable.body['line_items[0][price]'],priceId);
+  assert.equal([...h.sessions.values()][0].amount_subtotal,CATALOG[sku].unitAmount);
   assert.equal(Object.keys(chargeCapable.body).some(k=>k.startsWith('line_items[0][price_data]')),false);
   assert.ok(h.calls.findIndex(c=>c.path==='prices/'+priceId)<h.calls.findIndex(c=>c.path==='checkout/sessions'));
 });
